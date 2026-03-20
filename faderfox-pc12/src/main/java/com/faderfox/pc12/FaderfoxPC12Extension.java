@@ -7,11 +7,10 @@ import com.bitwig.extension.controller.api.CursorDevice;
 import com.bitwig.extension.controller.api.CursorDeviceFollowMode;
 import com.bitwig.extension.controller.api.CursorRemoteControlsPage;
 import com.bitwig.extension.controller.api.CursorTrack;
+import com.bitwig.extension.controller.api.HardwareBinding;
 import com.bitwig.extension.controller.api.HardwareSurface;
 import com.bitwig.extension.controller.api.MidiIn;
 import com.bitwig.extension.controller.api.RemoteControl;
-import com.bitwig.extension.controller.api.ext.Layer;
-import com.bitwig.extension.controller.api.ext.Layers;
 
 public class FaderfoxPC12Extension extends ControllerExtension
 {
@@ -21,7 +20,8 @@ public class FaderfoxPC12Extension extends ControllerExtension
    private static final int NUM_CHANNELS = 16;
    private static final int TOTAL_KNOBS = NUM_GROUPS * NUM_KNOBS_PER_GROUP; // 72
 
-   private Layer[][] ffLayers; // [group][channel]
+   private AbsoluteHardwareKnob[][] knobs; // [channel][knob]
+   private HardwareBinding[] activeBindings;
    private CursorRemoteControlsPage remoteControls;
    private ControllerHost host;
 
@@ -55,10 +55,9 @@ public class FaderfoxPC12Extension extends ControllerExtension
 
       // Hardware surface
       HardwareSurface surface = host.createHardwareSurface();
-      Layers layers = new Layers(this);
 
-      // Create 72 knobs × 16 channels = 1152 hardware knobs
-      AbsoluteHardwareKnob[][] knobs = new AbsoluteHardwareKnob[NUM_CHANNELS][TOTAL_KNOBS];
+      // Create 72 knobs × 16 channels
+      knobs = new AbsoluteHardwareKnob[NUM_CHANNELS][TOTAL_KNOBS];
       for (int ch = 0; ch < NUM_CHANNELS; ch++)
       {
          for (int i = 0; i < TOTAL_KNOBS; i++)
@@ -69,61 +68,70 @@ public class FaderfoxPC12Extension extends ControllerExtension
          }
       }
 
-      // Create 9 groups × 16 channels = 144 layers
-      ffLayers = new Layer[NUM_GROUPS][NUM_CHANNELS];
-      for (int g = 0; g < NUM_GROUPS; g++)
-      {
-         for (int ch = 0; ch < NUM_CHANNELS; ch++)
-         {
-            ffLayers[g][ch] = new Layer(layers, "FF" + (g + 1) + "_CH" + ch);
-            for (int p = 0; p < NUM_KNOBS_PER_GROUP; p++)
-            {
-               ffLayers[g][ch].bind(knobs[ch][g * NUM_KNOBS_PER_GROUP + p],
-                  remoteControls.getParameter(p));
-            }
-         }
-      }
+      activeBindings = new HardwareBinding[0];
 
       // Observe page changes
-      remoteControls.pageNames().addValueObserver(names -> updateActiveLayers());
-      remoteControls.selectedPageIndex().addValueObserver(idx -> updateActiveLayers());
+      remoteControls.pageNames().addValueObserver(names -> updateActiveBindings());
+      remoteControls.selectedPageIndex().addValueObserver(idx -> updateActiveBindings());
 
       host.println("Faderfox PC12 initialized");
    }
 
-   private void updateActiveLayers()
+   private void updateActiveBindings()
    {
-      // Deactivate all layers
-      for (int g = 0; g < NUM_GROUPS; g++)
+      // Remove existing bindings
+      for (HardwareBinding binding : activeBindings)
       {
-         for (int ch = 0; ch < NUM_CHANNELS; ch++)
-         {
-            ffLayers[g][ch].setIsActive(false);
-         }
+         binding.removeBinding();
       }
 
       int pageIndex = remoteControls.selectedPageIndex().get();
-      if (pageIndex < 0) return;
+      if (pageIndex < 0)
+      {
+         activeBindings = new HardwareBinding[0];
+         return;
+      }
 
       String[] names = remoteControls.pageNames().get();
-      if (pageIndex >= names.length) return;
+      if (pageIndex >= names.length)
+      {
+         activeBindings = new HardwareBinding[0];
+         return;
+      }
 
       String pageName = names[pageIndex];
       PageConfig config = parsePageName(pageName);
-      if (config == null) return;
+      if (config == null)
+      {
+         activeBindings = new HardwareBinding[0];
+         return;
+      }
 
       if (config.channel == -1)
       {
-         // Any channel — activate all 16 channel layers for this group
+         // Any channel — bind all 16 channels for this group
+         HardwareBinding[] bindings = new HardwareBinding[NUM_CHANNELS * NUM_KNOBS_PER_GROUP];
+         int idx = 0;
          for (int ch = 0; ch < NUM_CHANNELS; ch++)
          {
-            ffLayers[config.groupIndex][ch].setIsActive(true);
+            for (int p = 0; p < NUM_KNOBS_PER_GROUP; p++)
+            {
+               bindings[idx++] = knobs[ch][config.groupIndex * NUM_KNOBS_PER_GROUP + p]
+                  .addBinding(remoteControls.getParameter(p));
+            }
          }
+         activeBindings = bindings;
       }
       else
       {
          // Specific channel only
-         ffLayers[config.groupIndex][config.channel].setIsActive(true);
+         HardwareBinding[] bindings = new HardwareBinding[NUM_KNOBS_PER_GROUP];
+         for (int p = 0; p < NUM_KNOBS_PER_GROUP; p++)
+         {
+            bindings[p] = knobs[config.channel][config.groupIndex * NUM_KNOBS_PER_GROUP + p]
+               .addBinding(remoteControls.getParameter(p));
+         }
+         activeBindings = bindings;
       }
    }
 
