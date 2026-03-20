@@ -16,7 +16,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>12</maven.compiler.source>
         <maven.compiler.target>12</maven.compiler.target>
-        <bitwig.extension.directory>${user.home}/Bitwig Studio/Extensions</bitwig.extension.directory>
+        <bitwig.extension.directory>${project.basedir}/../Extensions</bitwig.extension.directory>
     </properties>
 
     <repositories>
