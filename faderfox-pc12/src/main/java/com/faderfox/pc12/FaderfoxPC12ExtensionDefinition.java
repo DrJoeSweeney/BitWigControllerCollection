@@ -24,10 +24,10 @@ public class FaderfoxPC12ExtensionDefinition extends ControllerExtensionDefiniti
    public UUID getId() { return DRIVER_ID; }
 
    @Override
-   public String getHardwareVendor() { return "Faderfox"; }
+   public String getHardwareVendor() { return "DocJoe"; }
 
    @Override
-   public String getHardwareModel() { return "PC12"; }
+   public String getHardwareModel() { return "FaderFox PC12"; }
 
    @Override
    public int getRequiredAPIVersion() { return 18; }
