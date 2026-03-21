@@ -1,0 +1,483 @@
+package com.electraone.bitwig;
+
+import com.bitwig.extension.controller.ControllerExtension;
+import com.bitwig.extension.controller.api.AbsoluteHardwareKnob;
+import com.bitwig.extension.controller.api.ControllerHost;
+import com.bitwig.extension.controller.api.CursorDevice;
+import com.bitwig.extension.controller.api.CursorDeviceFollowMode;
+import com.bitwig.extension.controller.api.CursorRemoteControlsPage;
+import com.bitwig.extension.controller.api.CursorTrack;
+import com.bitwig.extension.controller.api.HardwareBinding;
+import com.bitwig.extension.controller.api.HardwareSurface;
+import com.bitwig.extension.controller.api.MidiIn;
+import com.bitwig.extension.controller.api.MidiOut;
+import com.bitwig.extension.controller.api.RemoteControl;
+import com.bitwig.extension.controller.api.SettableEnumValue;
+
+import static com.electraone.bitwig.ElectraOneMidiConfig.*;
+
+public class ElectraOneExtension extends ControllerExtension
+{
+   private ControllerHost host;
+   private MidiOut midiOut;
+   private MidiOut ctrlOut;
+   private ElectraOneSysEx sysEx;
+
+   private CursorTrack cursorTrack;
+   private CursorDevice cursorDevice;
+   private CursorRemoteControlsPage[] sectionPages;
+
+   private AbsoluteHardwareKnob[] paramKnobs;
+   private HardwareBinding[] paramBindings;
+
+   private int activeSection = 0;
+   private int basePage = 0;
+
+   // Dirty tracking
+   private boolean needsFullUpdate = true;
+   private final boolean[] paramValueDirty = new boolean[NUM_PARAMS];
+   private final boolean[] paramDisplayDirty = new boolean[NUM_PARAMS];
+
+   // Cached values for change detection
+   private final double[] lastSentValue = new double[NUM_PARAMS];
+   private final String[] lastSentName = new String[NUM_PARAMS];
+   private final String[] lastSentDisplayValue = new String[NUM_PARAMS];
+
+   // Cached state for display
+   private String cachedTrackName = "";
+   private String cachedDeviceName = "";
+   private final String[][] cachedPageNames = new String[NUM_SECTIONS][];
+
+   // 14-bit mode
+   private boolean use14Bit = false;
+   private final int[] pendingMSB = new int[NUM_PARAMS];
+   private SettableEnumValue resolutionSetting;
+
+   // E1 preset control IDs — 12 controls per section, params are indices 1-4 and 7-10
+   // Section 1: controls 1-12, Section 2: 13-24, Section 3: 25-36
+   // Within each section: knob positions map to control offsets 0-11
+   // Inner param knobs are at offsets 1,2,3,4 (row1) and 7,8,9,10 (row2) — 0-indexed within section
+   private static final int[] PARAM_CONTROL_OFFSET = { 1, 2, 3, 4, 7, 8, 9, 10 };
+
+   protected ElectraOneExtension(
+         ElectraOneExtensionDefinition definition, ControllerHost host)
+   {
+      super(definition, host);
+   }
+
+   @Override
+   public void init()
+   {
+      host = getHost();
+      host.println("=== Electra One extension starting init() ===");
+
+      // MIDI ports
+      MidiIn midiIn = host.getMidiInPort(PORT_MIDI);
+      MidiIn ctrlIn = host.getMidiInPort(PORT_CTRL);
+      midiOut = host.getMidiOutPort(PORT_MIDI);
+      ctrlOut = host.getMidiOutPort(PORT_CTRL);
+      sysEx = new ElectraOneSysEx(ctrlOut);
+
+      // Preference: 7-bit vs 14-bit
+      resolutionSetting = host.getPreferences().getEnumSetting(
+         "CC Resolution", "MIDI", new String[]{ "7-bit", "14-bit" }, "7-bit");
+      resolutionSetting.markInterested();
+      resolutionSetting.addValueObserver(val -> {
+         use14Bit = "14-bit".equals(val);
+         host.println("CC resolution: " + val);
+         needsFullUpdate = true;
+      });
+
+      // Cursor track + device
+      cursorTrack = host.createCursorTrack("E1_CURSOR", "Cursor", 0, 0, true);
+      cursorDevice = cursorTrack.createCursorDevice(
+         "E1_DEVICE", "Device", 0, CursorDeviceFollowMode.FOLLOW_SELECTION);
+
+      cursorTrack.name().markInterested();
+      cursorTrack.name().addValueObserver(name -> {
+         cachedTrackName = name;
+         needsFullUpdate = true;
+      });
+
+      cursorDevice.name().markInterested();
+      cursorDevice.name().addValueObserver(name -> {
+         cachedDeviceName = name;
+         needsFullUpdate = true;
+      });
+
+      // 3 section pages — independent cursors on the same device
+      sectionPages = new CursorRemoteControlsPage[NUM_SECTIONS];
+      for (int s = 0; s < NUM_SECTIONS; s++)
+      {
+         sectionPages[s] = cursorDevice.createCursorRemoteControlsPage(
+            "E1_SECTION_" + (s + 1), NUM_PARAMS, "");
+         sectionPages[s].selectedPageIndex().markInterested();
+         sectionPages[s].pageNames().markInterested();
+
+         final int section = s;
+         sectionPages[s].selectedPageIndex().addValueObserver(index -> {
+            needsFullUpdate = true;
+         });
+         sectionPages[s].pageNames().addValueObserver(names -> {
+            cachedPageNames[section] = names;
+            // Set this section's page to its expected index
+            updateSectionPageIndex(section);
+         });
+
+         for (int p = 0; p < NUM_PARAMS; p++)
+         {
+            RemoteControl param = sectionPages[s].getParameter(p);
+            param.markInterested();
+            param.name().markInterested();
+            param.displayedValue().markInterested();
+
+            if (s == activeSection)
+            {
+               final int pi = p;
+               param.value().addValueObserver(v -> {
+                  paramValueDirty[pi] = true;
+               });
+               param.name().addValueObserver(n -> {
+                  paramDisplayDirty[pi] = true;
+               });
+               param.displayedValue().addValueObserver(dv -> {
+                  paramDisplayDirty[pi] = true;
+               });
+            }
+         }
+      }
+
+      // Set initial section page indices
+      updateAllSectionPageIndices();
+
+      // Hardware surface
+      HardwareSurface surface = host.createHardwareSurface();
+
+      // Parameter knobs (absolute, 7-bit by default)
+      paramKnobs = new AbsoluteHardwareKnob[NUM_PARAMS];
+      paramBindings = new HardwareBinding[NUM_PARAMS];
+      for (int i = 0; i < NUM_PARAMS; i++)
+      {
+         paramKnobs[i] = surface.createAbsoluteHardwareKnob("PARAM_" + i);
+         paramKnobs[i].setAdjustValueMatcher(
+            midiIn.createAbsoluteCCValueMatcher(CHANNEL, PARAM_CC_MSB[i]));
+      }
+      bindParamKnobs();
+
+      // Raw MIDI callback for navigation knobs + 14-bit LSB handling
+      midiIn.setMidiCallback((int status, int data1, int data2) -> {
+         // Only handle CC messages on our channel
+         if ((status & 0xF0) != 0xB0) return;
+         if ((status & 0x0F) != CHANNEL) return;
+
+         // Navigation knobs — relative 2's complement
+         // Values 1-63 = clockwise (increment), 65-127 = counter-clockwise (decrement)
+         if (data1 == CC_TRACK)
+         {
+            if (data2 < 64) cursorTrack.selectNext();
+            else cursorTrack.selectPrevious();
+            return;
+         }
+         if (data1 == CC_DEVICE)
+         {
+            if (data2 < 64) cursorDevice.selectNext();
+            else cursorDevice.selectPrevious();
+            return;
+         }
+         if (data1 == CC_PAGE)
+         {
+            if (data2 < 64) sectionPages[activeSection].selectNextPage(false);
+            else sectionPages[activeSection].selectPreviousPage(false);
+            return;
+         }
+         if (data1 == CC_BANK)
+         {
+            if (data2 < 64)
+            {
+               basePage += NUM_SECTIONS;
+               updateAllSectionPageIndices();
+               needsFullUpdate = true;
+               host.requestFlush();
+            }
+            else if (basePage >= NUM_SECTIONS)
+            {
+               basePage -= NUM_SECTIONS;
+               updateAllSectionPageIndices();
+               needsFullUpdate = true;
+               host.requestFlush();
+            }
+            return;
+         }
+
+         // 14-bit LSB handling
+         if (!use14Bit) return;
+         for (int i = 0; i < NUM_PARAMS; i++)
+         {
+            if (data1 == PARAM_CC_LSB[i])
+            {
+               // Combine with last MSB to form 14-bit value
+               int combined = (pendingMSB[i] << 7) | data2;
+               double normalized = combined / 16383.0;
+               sectionPages[activeSection].getParameter(i).set(normalized);
+               return;
+            }
+            if (data1 == PARAM_CC_MSB[i])
+            {
+               pendingMSB[i] = data2;
+               return;
+            }
+         }
+      });
+
+      // SysEx callback on CTRL port for section switching
+      ctrlIn.setSysexCallback((String data) -> {
+         int section = ElectraOneSysEx.parseSectionSwitch(data);
+         if (section >= 0 && section < NUM_SECTIONS && section != activeSection)
+         {
+            host.println("Section switch: " + (section + 1));
+            activeSection = section;
+            rebindParamKnobs();
+            needsFullUpdate = true;
+            host.requestFlush();
+         }
+      });
+
+      // Initialize caches
+      for (int i = 0; i < NUM_PARAMS; i++)
+      {
+         lastSentValue[i] = -1;
+         lastSentName[i] = "";
+         lastSentDisplayValue[i] = "";
+         paramValueDirty[i] = true;
+         paramDisplayDirty[i] = true;
+      }
+
+      host.println("Electra One initialized — 3 sections, " + NUM_PARAMS + " params per section");
+   }
+
+   private void bindParamKnobs()
+   {
+      for (int i = 0; i < NUM_PARAMS; i++)
+      {
+         paramBindings[i] = paramKnobs[i].addBinding(
+            sectionPages[activeSection].getParameter(i));
+      }
+   }
+
+   private void rebindParamKnobs()
+   {
+      // Remove old bindings
+      for (int i = 0; i < NUM_PARAMS; i++)
+      {
+         if (paramBindings[i] != null)
+         {
+            paramBindings[i].removeBinding();
+            paramBindings[i] = null;
+         }
+      }
+      // Create new bindings for active section
+      bindParamKnobs();
+
+      // Mark all params dirty so flush sends fresh values
+      for (int i = 0; i < NUM_PARAMS; i++)
+      {
+         paramValueDirty[i] = true;
+         paramDisplayDirty[i] = true;
+         lastSentValue[i] = -1;
+         lastSentName[i] = "";
+         lastSentDisplayValue[i] = "";
+      }
+   }
+
+   private void updateSectionPageIndex(int section)
+   {
+      int targetIndex = basePage + section;
+      String[] names = cachedPageNames[section];
+      if (names != null && targetIndex < names.length)
+      {
+         sectionPages[section].selectedPageIndex().set(targetIndex);
+      }
+   }
+
+   private void updateAllSectionPageIndices()
+   {
+      for (int s = 0; s < NUM_SECTIONS; s++)
+      {
+         updateSectionPageIndex(s);
+      }
+   }
+
+   @Override
+   public void flush()
+   {
+      // Stage 1: Full display refresh
+      if (needsFullUpdate)
+      {
+         needsFullUpdate = false;
+         sendFullDisplayUpdate();
+
+         // Mark all active section params dirty for CC feedback
+         for (int i = 0; i < NUM_PARAMS; i++)
+         {
+            paramValueDirty[i] = true;
+            paramDisplayDirty[i] = true;
+         }
+      }
+
+      // Stage 2: Incremental display updates for active section
+      for (int i = 0; i < NUM_PARAMS; i++)
+      {
+         if (paramDisplayDirty[i])
+         {
+            paramDisplayDirty[i] = false;
+            RemoteControl param = sectionPages[activeSection].getParameter(i);
+            String name = param.name().get();
+            String displayValue = param.displayedValue().get();
+
+            if (!name.equals(lastSentName[i]) || !displayValue.equals(lastSentDisplayValue[i]))
+            {
+               lastSentName[i] = name;
+               lastSentDisplayValue[i] = displayValue;
+               int controlId = getControlId(activeSection, i);
+               sysEx.sendControlUpdate(controlId, name, displayValue);
+            }
+         }
+      }
+
+      // Also update non-active sections' display when their params change
+      for (int s = 0; s < NUM_SECTIONS; s++)
+      {
+         if (s == activeSection) continue;
+         for (int i = 0; i < NUM_PARAMS; i++)
+         {
+            RemoteControl param = sectionPages[s].getParameter(i);
+            String name = param.name().get();
+            String displayValue = param.displayedValue().get();
+            int controlId = getControlId(s, i);
+            // We don't have per-section dirty tracking for non-active sections,
+            // but the full update handles them. Skip incremental for non-active.
+         }
+      }
+
+      // Stage 3: CC value feedback for active section parameters
+      for (int i = 0; i < NUM_PARAMS; i++)
+      {
+         if (paramValueDirty[i])
+         {
+            paramValueDirty[i] = false;
+            double value = sectionPages[activeSection].getParameter(i).get();
+
+            if (value != lastSentValue[i])
+            {
+               lastSentValue[i] = value;
+               sendParamCC(i, value);
+            }
+         }
+      }
+   }
+
+   private void sendFullDisplayUpdate()
+   {
+      // Send parameter names and values for all 3 sections
+      for (int s = 0; s < NUM_SECTIONS; s++)
+      {
+         for (int i = 0; i < NUM_PARAMS; i++)
+         {
+            RemoteControl param = sectionPages[s].getParameter(i);
+            String name = param.name().get();
+            String displayValue = param.displayedValue().get();
+            int controlId = getControlId(s, i);
+
+            sysEx.sendControlUpdate(controlId, name, displayValue);
+
+            // Update cache for active section
+            if (s == activeSection)
+            {
+               lastSentName[i] = name;
+               lastSentDisplayValue[i] = displayValue;
+            }
+         }
+      }
+
+      // Send track name to navigation controls (knob 1 area)
+      // Using control IDs for nav knobs: offset 0 (track), 5 (device), 6 (page), 11 (bank)
+      sysEx.sendControlUpdate(getNavControlId(activeSection, 0),
+         "Track", cachedTrackName);
+      sysEx.sendControlUpdate(getNavControlId(activeSection, 5),
+         "Device", cachedDeviceName);
+
+      // Send page names
+      for (int s = 0; s < NUM_SECTIONS; s++)
+      {
+         String pageName = getPageName(s);
+         sysEx.sendControlUpdate(getNavControlId(s, 6),
+            "Page", pageName);
+      }
+
+      sysEx.sendControlUpdate(getNavControlId(activeSection, 11),
+         "Bank", "Bank " + ((basePage / NUM_SECTIONS) + 1));
+   }
+
+   /**
+    * Get the E1 preset control ID for a parameter knob.
+    * Section 0: controls 1-12, Section 1: 13-24, Section 2: 25-36
+    * Param knobs are at offsets 1,2,3,4,7,8,9,10 within each section.
+    */
+   private int getControlId(int section, int paramIndex)
+   {
+      return (section * 12) + PARAM_CONTROL_OFFSET[paramIndex] + 1;
+   }
+
+   /**
+    * Get the E1 preset control ID for a navigation knob.
+    * @param section the section (0-2)
+    * @param offset the knob offset within the section (0, 5, 6, or 11)
+    */
+   private int getNavControlId(int section, int offset)
+   {
+      return (section * 12) + offset + 1;
+   }
+
+   private String getPageName(int section)
+   {
+      int pageIndex = basePage + section;
+      String[] names = cachedPageNames[section];
+      if (names != null && pageIndex < names.length)
+      {
+         return names[pageIndex];
+      }
+      return "---";
+   }
+
+   private void sendParamCC(int paramIndex, double value)
+   {
+      if (use14Bit)
+      {
+         int val14 = (int) Math.round(value * 16383.0);
+         int msb = (val14 >> 7) & 0x7F;
+         int lsb = val14 & 0x7F;
+         midiOut.sendMidi(0xB0 | CHANNEL, PARAM_CC_MSB[paramIndex], msb);
+         midiOut.sendMidi(0xB0 | CHANNEL, PARAM_CC_LSB[paramIndex], lsb);
+      }
+      else
+      {
+         int val7 = (int) Math.round(value * 127.0);
+         midiOut.sendMidi(0xB0 | CHANNEL, PARAM_CC_MSB[paramIndex], val7);
+      }
+   }
+
+   @Override
+   public void exit()
+   {
+      // Clear the E1 display by sending empty names/values
+      for (int s = 0; s < NUM_SECTIONS; s++)
+      {
+         for (int i = 0; i < NUM_PARAMS; i++)
+         {
+            int controlId = getControlId(s, i);
+            sysEx.sendControlUpdate(controlId, "", "");
+         }
+      }
+      host.println("Electra One exited");
+   }
+}
