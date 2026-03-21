@@ -20,15 +20,33 @@ my-controller/
 ├── pom.xml
 ├── src/
 │   └── main/
-│       └── java/
-│           └── com/
-│               └── example/
-│                   └── mycontroller/
-│                       ├── MyControllerExtensionDefinition.java
-│                       └── MyControllerExtension.java
+│       ├── java/
+│       │   └── com/
+│       │       └── example/
+│       │           └── mycontroller/
+│       │               ├── MyControllerExtensionDefinition.java
+│       │               └── MyControllerExtension.java
+│       └── resources/
+│           └── META-INF/
+│               └── services/
+│                   └── com.bitwig.extension.ExtensionDefinition
 └── target/
     └── MyController.bwextension          (build output)
 ```
+
+## CRITICAL: ServiceLoader Registration
+
+Bitwig uses Java's ServiceLoader to discover extensions. You **must** create this file:
+
+`src/main/resources/META-INF/services/com.bitwig.extension.ExtensionDefinition`
+
+Contents — one line with the fully qualified class name of your definition:
+
+```
+com.example.mycontroller.MyControllerExtensionDefinition
+```
+
+**Without this file, Bitwig will fail with "No extensions found" even though the .bwextension file is in the correct folder.**
 
 ## pom.xml Template
 
@@ -268,6 +286,7 @@ After building:
 ## Checklist for New Projects
 
 - [ ] Generate a unique UUID
+- [ ] Create `src/main/resources/META-INF/services/com.bitwig.extension.ExtensionDefinition` with the definition class name
 - [ ] Set correct `getRequiredAPIVersion()` matching your `extension-api` dependency version
 - [ ] Set `getNumMidiInPorts()` / `getNumMidiOutPorts()` to match your hardware
 - [ ] Fill in auto-detection port names if applicable

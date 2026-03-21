@@ -138,9 +138,27 @@ export BITWIG_DEBUG_PORT=5005
 |-------|-----|
 | Build failed | Check `mvn clean install` output for errors |
 | `.bwextension` not in Extensions folder | Verify `bitwig.extension.directory` in pom.xml matches your OS path |
+| "No extensions found" IOException | Missing `META-INF/services/com.bitwig.extension.ExtensionDefinition` file — see below |
 | `getRequiredAPIVersion()` too high | Lower it to match your `extension-api` dependency version |
 | Class loading error | Check Controller Script Console for stack traces |
 | Duplicate UUID | Ensure your extension UUID is unique |
+
+### "No extensions found" — Missing ServiceLoader Registration
+
+Bitwig uses Java's ServiceLoader to discover extensions inside `.bwextension` (JAR) files. If the service provider file is missing, Bitwig logs:
+
+```
+Error scanning extension file xxx.bwextension:
+    java.io.IOException: No extensions found in ...xxx.bwextension
+```
+
+**Fix**: Create the file `src/main/resources/META-INF/services/com.bitwig.extension.ExtensionDefinition` containing the fully qualified class name of your `ControllerExtensionDefinition` subclass:
+
+```
+com.example.mycontroller.MyControllerExtensionDefinition
+```
+
+Then rebuild with `mvn clean install`. This file **must** be present in every extension JAR.
 
 ### Extension Loads but Doesn't Work
 
