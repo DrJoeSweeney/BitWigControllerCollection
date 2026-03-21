@@ -54,7 +54,10 @@ public class ElectraOneExtension extends ControllerExtension
    // 14-bit mode
    private boolean use14Bit = false;
    private final int[] pendingMSB = new int[NUM_PARAMS];
-   private SettableEnumValue resolutionSetting;
+
+   // Page filter — when enabled, only pages containing "E1" are navigable
+   private boolean filterE1Pages = false;
+   private int[] filteredPageIndices;  // actual page indices that pass filter; null = no filter
 
    // E1 preset control IDs — 12 controls per section, params are indices 1-4 and 7-10
    // Section 1: controls 1-12, Section 2: 13-24, Section 3: 25-36
@@ -82,13 +85,27 @@ public class ElectraOneExtension extends ControllerExtension
       sysEx = new ElectraOneSysEx(ctrlOut);
 
       // Preference: 7-bit vs 14-bit
-      resolutionSetting = host.getPreferences().getEnumSetting(
+      SettableEnumValue resolutionSetting = host.getPreferences().getEnumSetting(
          "CC Resolution", "MIDI", new String[]{ "7-bit", "14-bit" }, "7-bit");
       resolutionSetting.markInterested();
       resolutionSetting.addValueObserver(val -> {
          use14Bit = "14-bit".equals(val);
          host.println("CC resolution: " + val);
          needsFullUpdate = true;
+      });
+
+      // Preference: page filter
+      SettableEnumValue filterSetting = host.getPreferences().getEnumSetting(
+         "Page Filter", "Pages", new String[]{ "All Pages", "E1 Only" }, "All Pages");
+      filterSetting.markInterested();
+      filterSetting.addValueObserver(val -> {
+         filterE1Pages = "E1 Only".equals(val);
+         host.println("Page filter: " + val);
+         recomputeFilteredPages();
+         basePage = 0;
+         updateAllSectionPageIndices();
+         needsFullUpdate = true;
+         host.requestFlush();
       });
 
       // Cursor track + device
@@ -123,6 +140,8 @@ public class ElectraOneExtension extends ControllerExtension
          });
          sectionPages[s].pageNames().addValueObserver(names -> {
             cachedPageNames[section] = names;
+            // Recompute filter when section 0 reports (all sections share same page list)
+            if (section == 0) recomputeFilteredPages();
             // Set this section's page to its expected index
             updateSectionPageIndex(section);
          });
@@ -187,18 +206,54 @@ public class ElectraOneExtension extends ControllerExtension
          }
          if (data1 == CC_PAGE)
          {
-            if (data2 < 64) sectionPages[activeSection].selectNextPage(false);
-            else sectionPages[activeSection].selectPreviousPage(false);
+            if (filteredPageIndices != null)
+            {
+               // Navigate to next/prev filtered page for active section
+               int currentActual = sectionPages[activeSection].selectedPageIndex().get();
+               if (data2 < 64)
+               {
+                  for (int fi : filteredPageIndices)
+                  {
+                     if (fi > currentActual)
+                     {
+                        sectionPages[activeSection].selectedPageIndex().set(fi);
+                        break;
+                     }
+                  }
+               }
+               else
+               {
+                  for (int j = filteredPageIndices.length - 1; j >= 0; j--)
+                  {
+                     if (filteredPageIndices[j] < currentActual)
+                     {
+                        sectionPages[activeSection].selectedPageIndex().set(
+                           filteredPageIndices[j]);
+                        break;
+                     }
+                  }
+               }
+            }
+            else
+            {
+               if (data2 < 64) sectionPages[activeSection].selectNextPage(false);
+               else sectionPages[activeSection].selectPreviousPage(false);
+            }
             return;
          }
          if (data1 == CC_BANK)
          {
+            int maxBase = filteredPageIndices != null
+               ? filteredPageIndices.length : Integer.MAX_VALUE;
             if (data2 < 64)
             {
-               basePage += NUM_SECTIONS;
-               updateAllSectionPageIndices();
-               needsFullUpdate = true;
-               host.requestFlush();
+               if (basePage + NUM_SECTIONS < maxBase)
+               {
+                  basePage += NUM_SECTIONS;
+                  updateAllSectionPageIndices();
+                  needsFullUpdate = true;
+                  host.requestFlush();
+               }
             }
             else if (basePage >= NUM_SECTIONS)
             {
@@ -297,13 +352,30 @@ public class ElectraOneExtension extends ControllerExtension
       }
    }
 
+   /**
+    * Resolve the actual page index for a section, respecting the page filter.
+    * @return actual page index, or -1 if out of range
+    */
+   private int resolvePageIndex(int section)
+   {
+      int logicalIndex = basePage + section;
+      if (filteredPageIndices != null)
+      {
+         if (logicalIndex >= 0 && logicalIndex < filteredPageIndices.length)
+            return filteredPageIndices[logicalIndex];
+         return -1;
+      }
+      return logicalIndex;
+   }
+
    private void updateSectionPageIndex(int section)
    {
-      int targetIndex = basePage + section;
+      int actualIndex = resolvePageIndex(section);
+      if (actualIndex < 0) return;
       String[] names = cachedPageNames[section];
-      if (names != null && targetIndex < names.length)
+      if (names != null && actualIndex < names.length)
       {
-         sectionPages[section].selectedPageIndex().set(targetIndex);
+         sectionPages[section].selectedPageIndex().set(actualIndex);
       }
    }
 
@@ -312,6 +384,39 @@ public class ElectraOneExtension extends ControllerExtension
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
          updateSectionPageIndex(s);
+      }
+   }
+
+   /**
+    * Rebuild the filtered page index list from section 0's cached page names.
+    * When filter is off, sets filteredPageIndices to null (no filtering).
+    */
+   private void recomputeFilteredPages()
+   {
+      if (!filterE1Pages)
+      {
+         filteredPageIndices = null;
+         return;
+      }
+      String[] names = cachedPageNames[0];
+      if (names == null)
+      {
+         filteredPageIndices = new int[0];
+         return;
+      }
+      int count = 0;
+      for (String name : names)
+      {
+         if (name != null && name.contains("E1")) count++;
+      }
+      filteredPageIndices = new int[count];
+      int idx = 0;
+      for (int i = 0; i < names.length; i++)
+      {
+         if (names[i] != null && names[i].contains("E1"))
+         {
+            filteredPageIndices[idx++] = i;
+         }
       }
    }
 
@@ -441,11 +546,12 @@ public class ElectraOneExtension extends ControllerExtension
 
    private String getPageName(int section)
    {
-      int pageIndex = basePage + section;
+      int actualIndex = resolvePageIndex(section);
+      if (actualIndex < 0) return "---";
       String[] names = cachedPageNames[section];
-      if (names != null && pageIndex < names.length)
+      if (names != null && actualIndex < names.length)
       {
-         return names[pageIndex];
+         return names[actualIndex];
       }
       return "---";
    }
