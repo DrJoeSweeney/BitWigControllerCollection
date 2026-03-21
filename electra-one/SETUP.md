@@ -53,6 +53,19 @@ In the controller's settings panel in Bitwig, there's a **CC Resolution** prefer
 
 If you switch to 14-bit in Bitwig, you should also update the E1 preset controls from `cc7` to `cc14` type for the parameter faders (controls 2-5, 8-11 in each section).
 
+### Optional: Set page filter
+The **Page Filter** preference (under "Pages") controls which Remote Controls pages are visible:
+- **All Pages** (default): All pages are navigable
+- **E1 Only**: Only pages whose name contains "E1" are navigable
+
+When "E1 Only" is active:
+- The 3 sections only display matching pages
+- Knob 7 (Page) skips to the next/previous page containing "E1"
+- Knob 12 (Bank) advances through groups of 3 filtered pages
+- Non-matching pages are completely hidden from navigation
+
+To use this, include "E1" somewhere in the Remote Controls page name in Bitwig (e.g., "E1 Filter", "E1 Amp", "E1 Mod"). Pages without "E1" in the name will be skipped.
+
 ---
 
 ## Step 3: Verify It Works
