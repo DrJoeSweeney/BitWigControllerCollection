@@ -33,15 +33,18 @@ public class ElectraOneExtension extends ControllerExtension
    private int activeSection = 0;
    private int basePage = 0;
 
-   // Dirty tracking
+   // Dirty tracking — per-section for display, active-section-only for CC feedback
    private boolean needsFullUpdate = true;
+   private final boolean[][] sectionDisplayDirty = new boolean[NUM_SECTIONS][NUM_PARAMS];
    private final boolean[] paramValueDirty = new boolean[NUM_PARAMS];
-   private final boolean[] paramDisplayDirty = new boolean[NUM_PARAMS];
+
+   // Suppress CC echo: set when E1 hardware sends CC, cleared in flush
+   private final boolean[] paramFromHardware = new boolean[NUM_PARAMS];
 
    // Cached values for change detection
    private final double[] lastSentValue = new double[NUM_PARAMS];
-   private final String[] lastSentName = new String[NUM_PARAMS];
-   private final String[] lastSentDisplayValue = new String[NUM_PARAMS];
+   private final String[][] lastSentName = new String[NUM_SECTIONS][NUM_PARAMS];
+   private final String[][] lastSentDisplayValue = new String[NUM_SECTIONS][NUM_PARAMS];
 
    // Cached state for display
    private String cachedTrackName = "";
@@ -131,19 +134,17 @@ public class ElectraOneExtension extends ControllerExtension
             param.name().markInterested();
             param.displayedValue().markInterested();
 
-            if (s == activeSection)
-            {
-               final int pi = p;
-               param.value().addValueObserver(v -> {
-                  paramValueDirty[pi] = true;
-               });
-               param.name().addValueObserver(n -> {
-                  paramDisplayDirty[pi] = true;
-               });
-               param.displayedValue().addValueObserver(dv -> {
-                  paramDisplayDirty[pi] = true;
-               });
-            }
+            final int sec = s;
+            final int pi = p;
+            param.value().addValueObserver(v -> {
+               if (sec == activeSection) paramValueDirty[pi] = true;
+            });
+            param.name().addValueObserver(n -> {
+               sectionDisplayDirty[sec][pi] = true;
+            });
+            param.displayedValue().addValueObserver(dv -> {
+               sectionDisplayDirty[sec][pi] = true;
+            });
          }
       }
 
@@ -209,21 +210,25 @@ public class ElectraOneExtension extends ControllerExtension
             return;
          }
 
-         // 14-bit LSB handling
-         if (!use14Bit) return;
+         // Parameter CC handling — mark as hardware-originated to suppress echo
          for (int i = 0; i < NUM_PARAMS; i++)
          {
-            if (data1 == PARAM_CC_LSB[i])
+            if (data1 == PARAM_CC_MSB[i])
+            {
+               paramFromHardware[i] = true;
+               if (use14Bit)
+               {
+                  pendingMSB[i] = data2;
+                  return; // Wait for LSB
+               }
+               return; // 7-bit: hardware surface binding handles value
+            }
+            if (use14Bit && data1 == PARAM_CC_LSB[i])
             {
                // Combine with last MSB to form 14-bit value
                int combined = (pendingMSB[i] << 7) | data2;
                double normalized = combined / 16383.0;
                sectionPages[activeSection].getParameter(i).set(normalized);
-               return;
-            }
-            if (data1 == PARAM_CC_MSB[i])
-            {
-               pendingMSB[i] = data2;
                return;
             }
          }
@@ -243,13 +248,19 @@ public class ElectraOneExtension extends ControllerExtension
       });
 
       // Initialize caches
+      for (int s = 0; s < NUM_SECTIONS; s++)
+      {
+         for (int i = 0; i < NUM_PARAMS; i++)
+         {
+            lastSentName[s][i] = "";
+            lastSentDisplayValue[s][i] = "";
+            sectionDisplayDirty[s][i] = true;
+         }
+      }
       for (int i = 0; i < NUM_PARAMS; i++)
       {
          lastSentValue[i] = -1;
-         lastSentName[i] = "";
-         lastSentDisplayValue[i] = "";
          paramValueDirty[i] = true;
-         paramDisplayDirty[i] = true;
       }
 
       host.println("Electra One initialized — 3 sections, " + NUM_PARAMS + " params per section");
@@ -278,14 +289,11 @@ public class ElectraOneExtension extends ControllerExtension
       // Create new bindings for active section
       bindParamKnobs();
 
-      // Mark all params dirty so flush sends fresh values
+      // Mark all params dirty so flush sends fresh CC values
       for (int i = 0; i < NUM_PARAMS; i++)
       {
          paramValueDirty[i] = true;
-         paramDisplayDirty[i] = true;
          lastSentValue[i] = -1;
-         lastSentName[i] = "";
-         lastSentDisplayValue[i] = "";
       }
    }
 
@@ -320,48 +328,44 @@ public class ElectraOneExtension extends ControllerExtension
          for (int i = 0; i < NUM_PARAMS; i++)
          {
             paramValueDirty[i] = true;
-            paramDisplayDirty[i] = true;
          }
       }
 
-      // Stage 2: Incremental display updates for active section
-      for (int i = 0; i < NUM_PARAMS; i++)
+      // Stage 2: Incremental display updates for ALL sections
+      for (int s = 0; s < NUM_SECTIONS; s++)
       {
-         if (paramDisplayDirty[i])
+         for (int i = 0; i < NUM_PARAMS; i++)
          {
-            paramDisplayDirty[i] = false;
-            RemoteControl param = sectionPages[activeSection].getParameter(i);
-            String name = param.name().get();
-            String displayValue = param.displayedValue().get();
-
-            if (!name.equals(lastSentName[i]) || !displayValue.equals(lastSentDisplayValue[i]))
+            if (sectionDisplayDirty[s][i])
             {
-               lastSentName[i] = name;
-               lastSentDisplayValue[i] = displayValue;
-               int controlId = getControlId(activeSection, i);
-               sysEx.sendControlUpdate(controlId, name, displayValue);
+               sectionDisplayDirty[s][i] = false;
+               RemoteControl param = sectionPages[s].getParameter(i);
+               String name = param.name().get();
+               String displayValue = param.displayedValue().get();
+
+               if (!name.equals(lastSentName[s][i])
+                     || !displayValue.equals(lastSentDisplayValue[s][i]))
+               {
+                  lastSentName[s][i] = name;
+                  lastSentDisplayValue[s][i] = displayValue;
+                  int controlId = getControlId(s, i);
+                  sysEx.sendControlUpdate(controlId, name, displayValue);
+               }
             }
          }
       }
 
-      // Also update non-active sections' display when their params change
-      for (int s = 0; s < NUM_SECTIONS; s++)
-      {
-         if (s == activeSection) continue;
-         for (int i = 0; i < NUM_PARAMS; i++)
-         {
-            RemoteControl param = sectionPages[s].getParameter(i);
-            String name = param.name().get();
-            String displayValue = param.displayedValue().get();
-            int controlId = getControlId(s, i);
-            // We don't have per-section dirty tracking for non-active sections,
-            // but the full update handles them. Skip incremental for non-active.
-         }
-      }
-
       // Stage 3: CC value feedback for active section parameters
+      // Skip feedback for params that were just changed by hardware input (suppress echo)
       for (int i = 0; i < NUM_PARAMS; i++)
       {
+         if (paramFromHardware[i])
+         {
+            paramFromHardware[i] = false;
+            paramValueDirty[i] = false;
+            lastSentValue[i] = sectionPages[activeSection].getParameter(i).get();
+            continue;
+         }
          if (paramValueDirty[i])
          {
             paramValueDirty[i] = false;
@@ -390,12 +394,9 @@ public class ElectraOneExtension extends ControllerExtension
 
             sysEx.sendControlUpdate(controlId, name, displayValue);
 
-            // Update cache for active section
-            if (s == activeSection)
-            {
-               lastSentName[i] = name;
-               lastSentDisplayValue[i] = displayValue;
-            }
+            // Update cache
+            lastSentName[s][i] = name;
+            lastSentDisplayValue[s][i] = displayValue;
          }
       }
 
