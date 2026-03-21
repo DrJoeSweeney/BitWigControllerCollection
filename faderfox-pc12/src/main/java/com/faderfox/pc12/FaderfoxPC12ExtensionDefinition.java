@@ -12,7 +12,7 @@ public class FaderfoxPC12ExtensionDefinition extends ControllerExtensionDefiniti
    private static final UUID DRIVER_ID = UUID.fromString("24788967-112f-47e4-8d60-44a7ce611087");
 
    @Override
-   public String getName() { return "PC12"; }
+   public String getName() { return "Faderfox PC12"; }
 
    @Override
    public String getAuthor() { return "Custom"; }
