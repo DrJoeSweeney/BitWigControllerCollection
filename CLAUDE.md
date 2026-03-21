@@ -18,9 +18,12 @@ This project develops custom controller extensions for Bitwig Studio.
 
 ## Deploy Target
 
-- Linux: `~/Bitwig Studio/Extensions/`
-- macOS: `~/Documents/Bitwig Studio/Extensions/`
-- Windows: `%USERPROFILE%/Documents/Bitwig Studio/Extensions/`
+- `../Extensions/` (relative to the module directory, i.e. `<repo>/Extensions/`)
+
+## Extensions
+
+- **`faderfox-pc12/`** — Faderfox PC12: follows the selected device on the current track. One instrument at a time.
+- **`faderfox-pc12-multi/`** — Faderfox PC12 MultiInstrument: scans first 16 tracks, controls multiple instruments simultaneously via channel-based targeting (`FFn CHc`). Only enable one PC12 variant at a time.
 
 ## Skills
 

@@ -35,7 +35,7 @@ mvn clean install -DskipTests
 
 ### Build Output
 - JAR: `target/<artifactId>.jar`
-- Deployed: `~/Bitwig Studio/Extensions/<artifactId>.bwextension` (after `mvn install`)
+- Deployed: `../Extensions/<artifactId>.bwextension` (after `mvn install`)
 
 A `.bwextension` file is just a renamed `.jar`.
 
@@ -295,7 +295,7 @@ my-controller/
 ├── pom.xml                              ✓ Bitwig Maven repo configured
 ├── src/main/java/.../                   ✓ Definition + Extension classes
 ├── target/*.jar                         ✓ Build output
-└── ~/Bitwig Studio/Extensions/*.bwextension  ✓ Deployed
+└── ../Extensions/*.bwextension               ✓ Deployed
 ```
 
 Verify each step:

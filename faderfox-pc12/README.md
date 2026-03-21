@@ -17,24 +17,7 @@ cd faderfox-pc12
 mvn clean install
 ```
 
-This produces `faderfox-pc12.bwextension` and copies it to `~/Bitwig Studio/Extensions/`.
-
-> **Note:** The default deploy path is `~/Bitwig Studio/Extensions/` (Linux). For other platforms, override the path:
-> ```bash
-> # macOS
-> mvn clean install -Dbitwig.extension.directory="$HOME/Documents/Bitwig Studio/Extensions"
->
-> # Windows (Git Bash / WSL)
-> mvn clean install -Dbitwig.extension.directory="$USERPROFILE/Documents/Bitwig Studio/Extensions"
-> ```
-
-### Manual install
-
-If you already have the `.bwextension` file, copy it directly:
-
-```bash
-cp target/faderfox-pc12.jar ~/Bitwig\ Studio/Extensions/faderfox-pc12.bwextension
-```
+This produces `faderfox-pc12.bwextension` and copies it to `../Extensions/`.
 
 ### Add the controller in Bitwig
 
@@ -90,6 +73,10 @@ This lets you configure the PC12 to send on different channels and target specif
 6. Add a second page named `FF2` and map more parameters to CC18–25
 7. Turn CC18–25 — the FF2 parameters respond **at the same time** as FF1
 8. Add `FF3`, `FF4`, etc. — all groups work simultaneously, no page switching needed
+
+## Multi-Instrument Variant
+
+See `faderfox-pc12-multi/` for a variant that scans all 16 tracks and controls multiple instruments simultaneously using channel-based targeting. Only enable one PC12 variant at a time.
 
 ## Notes
 

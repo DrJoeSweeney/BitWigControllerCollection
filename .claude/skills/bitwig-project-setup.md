@@ -69,7 +69,7 @@ com.example.mycontroller.MyControllerExtensionDefinition
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>12</maven.compiler.source>
         <maven.compiler.target>12</maven.compiler.target>
-        <bitwig.extension.directory>${user.home}/Bitwig Studio/Extensions</bitwig.extension.directory>
+        <bitwig.extension.directory>${project.basedir}/../Extensions</bitwig.extension.directory>
     </properties>
 
     <repositories>
@@ -136,10 +136,7 @@ com.example.mycontroller.MyControllerExtensionDefinition
 ### Notes on pom.xml
 - **API version**: Check https://maven.bitwig.com for the latest `extension-api` version. Version 18 corresponds to Bitwig 5.x. Adjust to match your Bitwig Studio version.
 - **Java version**: Bitwig requires Java 12+. Use 17 if available.
-- **Deploy path**: The `bitwig.extension.directory` property auto-deploys on `mvn install`. Adjust for your OS:
-  - Linux: `~/Bitwig Studio/Extensions/`
-  - macOS: `~/Documents/Bitwig Studio/Extensions/`
-  - Windows: `%USERPROFILE%/Documents/Bitwig Studio/Extensions/`
+- **Deploy path**: The `bitwig.extension.directory` property auto-deploys on `mvn install` to `../Extensions/` (relative to the module).
 
 ## ControllerExtensionDefinition — The Descriptor
 
@@ -273,7 +270,7 @@ mvn clean install
 mvn clean package
 
 # The .bwextension file is at:
-# target/my-controller.jar  →  copied as  ~/Bitwig Studio/Extensions/my-controller.bwextension
+# target/my-controller.jar  →  copied as  ../Extensions/my-controller.bwextension
 ```
 
 After building:
