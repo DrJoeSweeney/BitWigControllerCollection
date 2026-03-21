@@ -55,7 +55,7 @@ The extension activates knob mappings based on **Remote Controls page names**. R
 | `FF1` – `FF9` | Knob group 1–9, responds on **all MIDI channels** |
 | `FF1 CH0` – `FF9 CH15` | Knob group 1–9, responds on **one specific MIDI channel** |
 
-Names are case-sensitive. All matching FF pages are active simultaneously — each group of knobs always controls its own page without needing to switch pages in Bitwig. Pages that don't match a pattern are still controlled by the knobs of their corresponding group (based on their cursor's default page selection). If two pages share the same name (e.g., two pages both named `FF1`), only the first one in the page list will be controlled — each group binds to a single page.
+Names are case-sensitive. All matching FF pages are active simultaneously — each group of knobs always controls its own page without needing to switch pages in Bitwig. Pages that don't match a pattern are ignored — their corresponding knobs do nothing. If two pages share the same name (e.g., two pages both named `FF1`), only the first one in the page list will be controlled — each group binds to a single page.
 
 ### CC mapping
 

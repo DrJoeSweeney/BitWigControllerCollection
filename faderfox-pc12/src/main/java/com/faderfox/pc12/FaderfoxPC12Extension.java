@@ -7,6 +7,7 @@ import com.bitwig.extension.controller.api.CursorDevice;
 import com.bitwig.extension.controller.api.CursorDeviceFollowMode;
 import com.bitwig.extension.controller.api.CursorRemoteControlsPage;
 import com.bitwig.extension.controller.api.CursorTrack;
+import com.bitwig.extension.controller.api.HardwareBinding;
 import com.bitwig.extension.controller.api.HardwareSurface;
 import com.bitwig.extension.controller.api.MidiIn;
 import com.bitwig.extension.controller.api.RemoteControl;
@@ -21,6 +22,7 @@ public class FaderfoxPC12Extension extends ControllerExtension
 
    private AbsoluteHardwareKnob[][] knobs; // [channel][knob]
    private CursorRemoteControlsPage[] remoteControls;
+   private HardwareBinding[][] groupBindings; // [group][binding]
    private ControllerHost host;
 
    protected FaderfoxPC12Extension(
@@ -78,34 +80,36 @@ public class FaderfoxPC12Extension extends ControllerExtension
          }
       }
 
-      // Bind each group's knobs (all 16 channels) to its CursorRemoteControlsPage
+      // Initialize per-group binding tracking
+      groupBindings = new HardwareBinding[NUM_GROUPS][];
       for (int g = 0; g < NUM_GROUPS; g++)
       {
-         for (int ch = 0; ch < NUM_CHANNELS; ch++)
-         {
-            for (int p = 0; p < NUM_KNOBS_PER_GROUP; p++)
-            {
-               int knobIndex = g * NUM_KNOBS_PER_GROUP + p;
-               knobs[ch][knobIndex].addBinding(remoteControls[g].getParameter(p));
-            }
-         }
+         groupBindings[g] = new HardwareBinding[0];
       }
 
-      // Navigate each cursor to its matching FF page when page names change
+      // Bind/unbind each group's knobs when page names change
       for (int g = 0; g < NUM_GROUPS; g++)
       {
          final int groupIndex = g;
          final String prefix = "FF" + (g + 1);
          remoteControls[g].pageNames().addValueObserver(names -> {
-            navigateToPage(groupIndex, prefix, names);
+            updateGroupBindings(groupIndex, prefix, names);
          });
       }
 
       host.println("Faderfox PC12 initialized — " + NUM_GROUPS + " groups bound");
    }
 
-   private void navigateToPage(int groupIndex, String prefix, String[] names)
+   private void updateGroupBindings(int groupIndex, String prefix, String[] names)
    {
+      // Remove existing bindings for this group
+      for (HardwareBinding binding : groupBindings[groupIndex])
+      {
+         binding.removeBinding();
+      }
+      groupBindings[groupIndex] = new HardwareBinding[0];
+
+      // Search for matching FFn page
       for (int i = 0; i < names.length; i++)
       {
          if (names[i] != null && names[i].startsWith(prefix)
@@ -113,10 +117,26 @@ public class FaderfoxPC12Extension extends ControllerExtension
                 || names[i].charAt(prefix.length()) == ' '))
          {
             remoteControls[groupIndex].selectedPageIndex().set(i);
+
+            // Bind all 16 channels of this group's knobs to the cursor's parameters
+            HardwareBinding[] bindings = new HardwareBinding[NUM_CHANNELS * NUM_KNOBS_PER_GROUP];
+            int b = 0;
+            for (int ch = 0; ch < NUM_CHANNELS; ch++)
+            {
+               for (int p = 0; p < NUM_KNOBS_PER_GROUP; p++)
+               {
+                  int knobIndex = groupIndex * NUM_KNOBS_PER_GROUP + p;
+                  bindings[b++] = knobs[ch][knobIndex].addBinding(
+                     remoteControls[groupIndex].getParameter(p));
+               }
+            }
+            groupBindings[groupIndex] = bindings;
+
             host.println("Group " + (groupIndex + 1) + " → page " + i + " (" + names[i] + ")");
             return;
          }
       }
+      host.println("Group " + (groupIndex + 1) + " → no matching page, unbound");
    }
 
    @Override
