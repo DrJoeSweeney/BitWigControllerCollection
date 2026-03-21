@@ -55,7 +55,7 @@ The extension activates knob mappings based on **Remote Controls page names**. R
 | `FF1` – `FF9` | Knob group 1–9, responds on **all MIDI channels** |
 | `FF1 CH0` – `FF9 CH15` | Knob group 1–9, responds on **one specific MIDI channel** |
 
-Names are case-sensitive. Pages that don't match a pattern are ignored (knobs do nothing).
+Names are case-sensitive. All matching FF pages are active simultaneously — each group of knobs always controls its own page without needing to switch pages in Bitwig. Pages that don't match a pattern are still controlled by the knobs of their corresponding group (based on their cursor's default page selection).
 
 ### CC mapping
 
@@ -88,11 +88,13 @@ This lets you configure the PC12 to send on different channels and target specif
 4. Map the 8 parameters you want to control
 5. Turn CC10–17 on your PC12 — the parameters respond
 6. Add a second page named `FF2` and map more parameters to CC18–25
-7. Navigate between pages in Bitwig to switch which group of knobs is active
+7. Turn CC18–25 — the FF2 parameters respond **at the same time** as FF1
+8. Add `FF3`, `FF4`, etc. — all groups work simultaneously, no page switching needed
 
 ## Notes
 
-- **Absolute knobs**: The PC12 sends absolute CC values (0–127). The first twist after switching pages may cause a parameter jump — this is inherent to absolute pots.
+- **All pages active at once**: Each FF group has its own independent cursor, so FF1 through FF9 all respond to their knobs simultaneously. No need to select a page before turning knobs.
+- **Absolute knobs**: The PC12 sends absolute CC values (0–127). The first twist may cause a parameter jump — this is inherent to absolute pots.
 - **Device follows selection**: The extension tracks whichever device is selected on the current track. Selecting a different device automatically updates the mappings.
 - **No MIDI output**: The PC12 has no LEDs or displays, so the extension uses 0 MIDI out ports.
 - **No auto-detection**: You must manually select the MIDI port when adding the controller in Bitwig.
