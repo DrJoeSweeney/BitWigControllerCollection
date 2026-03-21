@@ -7,7 +7,6 @@ import com.bitwig.extension.controller.api.CursorDevice;
 import com.bitwig.extension.controller.api.CursorDeviceFollowMode;
 import com.bitwig.extension.controller.api.CursorRemoteControlsPage;
 import com.bitwig.extension.controller.api.CursorTrack;
-import com.bitwig.extension.controller.api.HardwareBinding;
 import com.bitwig.extension.controller.api.HardwareSurface;
 import com.bitwig.extension.controller.api.MidiIn;
 import com.bitwig.extension.controller.api.RemoteControl;
@@ -21,8 +20,7 @@ public class FaderfoxPC12Extension extends ControllerExtension
    private static final int TOTAL_KNOBS = NUM_GROUPS * NUM_KNOBS_PER_GROUP; // 72
 
    private AbsoluteHardwareKnob[][] knobs; // [channel][knob]
-   private HardwareBinding[] activeBindings;
-   private CursorRemoteControlsPage remoteControls;
+   private CursorRemoteControlsPage[] remoteControls;
    private ControllerHost host;
 
    protected FaderfoxPC12Extension(
@@ -35,22 +33,34 @@ public class FaderfoxPC12Extension extends ControllerExtension
    public void init()
    {
       host = getHost();
+      host.println("=== FaderFox PC12 extension starting init() ===");
+      host.println("API version: " + host.getHostApiVersion());
+      host.println("Host version: " + host.getHostVersion());
+      host.println("Loaded at: " + java.time.LocalTime.now());
+
       final MidiIn midiIn = host.getMidiInPort(0);
+      host.println("MIDI In port acquired");
 
       // Device cursor
       CursorTrack cursorTrack = host.createCursorTrack("PC12_CURSOR", "Cursor", 0, 0, true);
       CursorDevice cursorDevice = cursorTrack.createCursorDevice(
          "PC12_DEVICE", "Device", 0, CursorDeviceFollowMode.FOLLOW_SELECTION);
 
-      remoteControls = cursorDevice.createCursorRemoteControlsPage(NUM_KNOBS_PER_GROUP);
-      remoteControls.pageNames().markInterested();
-      remoteControls.selectedPageIndex().markInterested();
-
-      for (int i = 0; i < NUM_KNOBS_PER_GROUP; i++)
+      // One CursorRemoteControlsPage per group so all can be active simultaneously
+      remoteControls = new CursorRemoteControlsPage[NUM_GROUPS];
+      for (int g = 0; g < NUM_GROUPS; g++)
       {
-         RemoteControl param = remoteControls.getParameter(i);
-         param.markInterested();
-         param.name().markInterested();
+         remoteControls[g] = cursorDevice.createCursorRemoteControlsPage(
+            "FF_GROUP_" + (g + 1), NUM_KNOBS_PER_GROUP, "");
+         remoteControls[g].pageNames().markInterested();
+         remoteControls[g].selectedPageIndex().markInterested();
+
+         for (int i = 0; i < NUM_KNOBS_PER_GROUP; i++)
+         {
+            RemoteControl param = remoteControls[g].getParameter(i);
+            param.markInterested();
+            param.name().markInterested();
+         }
       }
 
       // Hardware surface
@@ -68,114 +78,44 @@ public class FaderfoxPC12Extension extends ControllerExtension
          }
       }
 
-      activeBindings = new HardwareBinding[0];
-
-      // Observe page changes
-      remoteControls.pageNames().addValueObserver(names -> updateActiveBindings());
-      remoteControls.selectedPageIndex().addValueObserver(idx -> updateActiveBindings());
-
-      host.println("Faderfox PC12 initialized");
-   }
-
-   private void updateActiveBindings()
-   {
-      // Remove existing bindings
-      for (HardwareBinding binding : activeBindings)
+      // Bind each group's knobs (all 16 channels) to its CursorRemoteControlsPage
+      for (int g = 0; g < NUM_GROUPS; g++)
       {
-         binding.removeBinding();
-      }
-
-      int pageIndex = remoteControls.selectedPageIndex().get();
-      if (pageIndex < 0)
-      {
-         activeBindings = new HardwareBinding[0];
-         return;
-      }
-
-      String[] names = remoteControls.pageNames().get();
-      if (pageIndex >= names.length)
-      {
-         activeBindings = new HardwareBinding[0];
-         return;
-      }
-
-      String pageName = names[pageIndex];
-      PageConfig config = parsePageName(pageName);
-      if (config == null)
-      {
-         activeBindings = new HardwareBinding[0];
-         return;
-      }
-
-      if (config.channel == -1)
-      {
-         // Any channel — bind all 16 channels for this group
-         HardwareBinding[] bindings = new HardwareBinding[NUM_CHANNELS * NUM_KNOBS_PER_GROUP];
-         int idx = 0;
          for (int ch = 0; ch < NUM_CHANNELS; ch++)
          {
             for (int p = 0; p < NUM_KNOBS_PER_GROUP; p++)
             {
-               bindings[idx++] = knobs[ch][config.groupIndex * NUM_KNOBS_PER_GROUP + p]
-                  .addBinding(remoteControls.getParameter(p));
+               int knobIndex = g * NUM_KNOBS_PER_GROUP + p;
+               knobs[ch][knobIndex].addBinding(remoteControls[g].getParameter(p));
             }
          }
-         activeBindings = bindings;
       }
-      else
+
+      // Navigate each cursor to its matching FF page when page names change
+      for (int g = 0; g < NUM_GROUPS; g++)
       {
-         // Specific channel only
-         HardwareBinding[] bindings = new HardwareBinding[NUM_KNOBS_PER_GROUP];
-         for (int p = 0; p < NUM_KNOBS_PER_GROUP; p++)
-         {
-            bindings[p] = knobs[config.channel][config.groupIndex * NUM_KNOBS_PER_GROUP + p]
-               .addBinding(remoteControls.getParameter(p));
-         }
-         activeBindings = bindings;
+         final int groupIndex = g;
+         final String prefix = "FF" + (g + 1);
+         remoteControls[g].pageNames().addValueObserver(names -> {
+            navigateToPage(groupIndex, prefix, names);
+         });
       }
+
+      host.println("Faderfox PC12 initialized — " + NUM_GROUPS + " groups bound");
    }
 
-   private static PageConfig parsePageName(String name)
+   private void navigateToPage(int groupIndex, String prefix, String[] names)
    {
-      if (name == null || name.length() < 3 || !name.startsWith("FF")) return null;
-
-      // Check for "FF<1-9>" optionally followed by " CH<0-15>"
-      char groupChar = name.charAt(2);
-      if (groupChar < '1' || groupChar > '9') return null;
-      int groupIndex = groupChar - '1';
-
-      if (name.length() == 3)
+      for (int i = 0; i < names.length; i++)
       {
-         // "FFn" — any channel
-         return new PageConfig(groupIndex, -1);
-      }
-
-      if (name.length() >= 7 && name.startsWith(" CH", 3))
-      {
-         String chStr = name.substring(6);
-         try
+         if (names[i] != null && names[i].startsWith(prefix)
+            && (names[i].length() == prefix.length()
+                || names[i].charAt(prefix.length()) == ' '))
          {
-            int ch = Integer.parseInt(chStr);
-            if (ch >= 0 && ch <= 15) return new PageConfig(groupIndex, ch);
+            remoteControls[groupIndex].selectedPageIndex().set(i);
+            host.println("Group " + (groupIndex + 1) + " → page " + i + " (" + names[i] + ")");
+            return;
          }
-         catch (NumberFormatException e)
-         {
-            return null;
-         }
-      }
-
-      return null;
-   }
-
-   private static class PageConfig
-   {
-      final int groupIndex;
-      final int channel; // -1 means all channels
-
-      PageConfig(int groupIndex, int channel)
-      {
-         this.groupIndex = groupIndex;
-         this.channel = channel;
       }
    }
 
