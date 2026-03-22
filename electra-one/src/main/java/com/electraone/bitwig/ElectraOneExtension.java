@@ -96,7 +96,7 @@ public class ElectraOneExtension extends ControllerExtension
       MidiIn ctrlIn = host.getMidiInPort(PORT_CTRL);
       midiOut = host.getMidiOutPort(PORT_MIDI);
       MidiOut ctrlOut = host.getMidiOutPort(PORT_CTRL);
-      sysEx = new ElectraOneSysEx(ctrlOut, midiOut, host);
+      sysEx = new ElectraOneSysEx(ctrlOut, host);
 
       // Preference: 7-bit vs 14-bit
       SettableEnumValue resolutionSetting = host.getPreferences().getEnumSetting(
@@ -313,6 +313,14 @@ public class ElectraOneExtension extends ControllerExtension
          lastSentValue[i] = -1;
          paramValueDirty[i] = true;
       }
+
+      // Test SysEx immediately — send a simple name update to control 1
+      host.println("=== Sending SysEx test: name-only update to control 1 ===");
+      sysEx.sendUpdateRuntime("{\"controlId\":1,\"name\":\"TEST\"}");
+      host.println("=== Sending SysEx test: value-only update to control 1 ===");
+      sysEx.sendUpdateRuntime("{\"controlId\":1,\"value\":{\"id\":\"value\",\"text\":\"Hello\"}}");
+      host.println("=== Sending SysEx test: combined update to control 2 ===");
+      sysEx.sendControlUpdate(2, "MyParam", "42%");
 
       // Delayed initial update
       host.scheduleTask(() -> {
