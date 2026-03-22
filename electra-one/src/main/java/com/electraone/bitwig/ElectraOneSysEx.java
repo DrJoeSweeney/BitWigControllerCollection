@@ -1,5 +1,6 @@
 package com.electraone.bitwig;
 
+import com.bitwig.extension.controller.api.ControllerHost;
 import com.bitwig.extension.controller.api.MidiOut;
 
 /**
@@ -12,19 +13,21 @@ import com.bitwig.extension.controller.api.MidiOut;
 public class ElectraOneSysEx
 {
    private final MidiOut ctrlOut;
+   private final ControllerHost host;
 
-   public ElectraOneSysEx(MidiOut ctrlOut)
+   // Log first N SysEx sends to verify format, then go quiet
+   private int sendCount = 0;
+   private static final int LOG_LIMIT = 5;
+
+   public ElectraOneSysEx(MidiOut ctrlOut, ControllerHost host)
    {
       this.ctrlOut = ctrlOut;
+      this.host = host;
    }
 
    /**
-    * Send an updateRuntime SysEx message with JSON payload to update
-    * a control's name and displayed value on the E1 screen.
-    *
-    * @param controlId the E1 control ID (from preset, 1-36)
-    * @param name      parameter name to display
-    * @param value     formatted parameter value to display
+    * Send an updateRuntime SysEx message to update a control's name
+    * and displayed value on the E1 screen.
     */
    public void sendControlUpdate(int controlId, String name, String value)
    {
@@ -51,14 +54,23 @@ public class ElectraOneSysEx
       }
       sb.append("F7");
 
-      ctrlOut.sendSysex(sb.toString());
+      String sysexHex = sb.toString();
+
+      // Log first few sends so we can verify the SysEx format
+      sendCount++;
+      if (sendCount <= LOG_LIMIT)
+      {
+         host.println("SysEx SEND #" + sendCount + " json=" + json);
+         host.println("  hex=" + sysexHex.substring(0, Math.min(120, sysexHex.length()))
+            + (sysexHex.length() > 120 ? "..." : ""));
+      }
+
+      ctrlOut.sendSysex(sysexHex);
    }
 
    /**
     * Parse a section switch SysEx message from the E1 touchscreen.
     * Expected format: F0 00 21 45 7E 07 [01|02|03] F7
-    * @param data hex string from setSysexCallback
-    * @return section number (0-2), or -1 if not a section switch message
     */
    public static int parseSectionSwitch(String data)
    {
@@ -84,9 +96,6 @@ public class ElectraOneSysEx
       return -1;
    }
 
-   /**
-    * Escape special characters for JSON strings.
-    */
    private static String escapeJson(String s)
    {
       if (s == null) return "";
