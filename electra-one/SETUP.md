@@ -1,31 +1,42 @@
 # Electra One Setup Guide
 
-The Electra One Bitwig controller extension is already implemented and deployed. This document describes what you need to configure on the Electra One hardware and in Bitwig before using it.
+The Electra One Bitwig controller extension maps the E1's 12 knobs (2 rows x 6) across 3 touchscreen control sets to show 3 consecutive Remote Controls pages of the selected device.
+
+---
+
+## Knob Layout (per control set)
+
+```
+Row A: [A1 Track] [A2 P0] [A3 P1] [A4 P2] [A5 P3] [A6 Device]
+Row B: [B1 Page]  [B2 P4] [B3 P5] [B4 P6] [B5 P7] [B6 Bank]
+```
+
+- **A2-A5, B2-B5** (8 inner knobs): Control the 8 parameters of that set's page
+- **A1**: Navigate tracks (prev/next)
+- **A6**: Navigate devices in chain (prev/next)
+- **B1**: Shift all 3 sets by 1 page (prev/next)
+- **B6**: Bank jump — shift all 3 sets by 3 pages
+
+## 3 Control Sets
+
+The E1 touchscreen shows 3 control sets (swipe to switch):
+- **Set 1** (red): Current page (page N)
+- **Set 2** (orange): Next page (page N+1)
+- **Set 3** (blue): Page N+2
+
+Swiping between sets on the E1 touchscreen rebinds the physical knobs to that set's page.
 
 ---
 
 ## Step 1: Upload the Preset to the Electra One
 
-The E1 needs a preset loaded that defines the control layout, CC assignments, and display sections. The preset file is at:
+The preset file is at `electra-one/preset/bitwig-remote-controls.json`.
 
-```
-electra-one/preset/bitwig-remote-controls.json
-```
-
-### How to upload:
-1. Open the [Electra One Web Editor](https://app.electra.one) in a browser
+1. Open the [Electra One Web Editor](https://app.electra.one)
 2. Connect your Electra One via USB
 3. Click **Import** and select `bitwig-remote-controls.json`
-4. The preset will upload to the E1
 
-### What the preset defines:
-- **36 controls** across 3 control sets (one per E1 section)
-- **2x6 grid layout** per section matching the 12 physical knobs
-- All controls on **MIDI channel 1**, using **CC 0-11**
-- **Section 1**: red parameter faders, white nav faders
-- **Section 2**: orange parameter faders, white nav faders
-- **Section 3**: blue parameter faders, white nav faders
-- All 3 sections share the same CC numbers (the Bitwig extension rebinds on section switch)
+The preset defines 36 controls (12 per set) on MIDI channel 1, CC 0-11.
 
 ---
 
@@ -37,56 +48,27 @@ electra-one/preset/bitwig-remote-controls.json
 3. Select **Electra One** (vendor: Electra One)
 
 ### Assign MIDI ports (if not auto-detected):
-The extension requires **2 MIDI input ports** and **2 MIDI output ports**:
 
 | Port | Function | Linux name | Mac/Windows name |
 |------|----------|-----------|-----------------|
 | Port 1 In/Out | MIDI (CC data) | `Electra Controller Electra Port 1` | `Electra Port 1` |
 | Port 2 In/Out | CTRL (SysEx) | `Electra Controller Electra CTRL` | `Electra CTRL` |
 
-Auto-detection is configured for all platforms, so this may happen automatically.
-
 ### Optional: Set CC resolution
-In the controller's settings panel in Bitwig, there's a **CC Resolution** preference:
 - **7-bit** (default): Standard 0-127 range
-- **14-bit**: High-resolution 0-16383 range using MSB+LSB CC pairs
-
-If you switch to 14-bit in Bitwig, you should also update the E1 preset controls from `cc7` to `cc14` type for the parameter faders (controls 2-5, 8-11 in each section).
+- **14-bit**: High-resolution 0-16383 using MSB+LSB CC pairs
 
 ### Optional: Set page filter
-The **Page Filter** preference (under "Pages") controls which Remote Controls pages are visible:
 - **All Pages** (default): All pages are navigable
 - **E1 Only**: Only pages whose name contains "E1" are navigable
-
-When "E1 Only" is active:
-- The 3 sections only display matching pages
-- Knob 7 (Page) skips to the next/previous page containing "E1"
-- Knob 12 (Bank) advances through groups of 3 filtered pages
-- Non-matching pages are completely hidden from navigation
-
-To use this, include "E1" somewhere in the Remote Controls page name in Bitwig (e.g., "E1 Filter", "E1 Amp", "E1 Mod"). Pages without "E1" in the name will be skipped.
 
 ---
 
 ## Step 3: Verify It Works
 
-1. Select an instrument track in Bitwig that has Remote Controls pages
-2. **Parameter control**: Turn inner knobs (2-5, 8-11) on E1 - parameters change in Bitwig
-3. **Value feedback**: Change a param in Bitwig's UI - E1 knob position updates
-4. **Navigation**: Turn corner knobs:
-   - Knob 1 (top-left) - prev/next track
-   - Knob 6 (top-right) - prev/next device
-   - Knob 7 (bottom-left) - prev/next Remote Controls page
-   - Knob 12 (bottom-right) - prev/next page bank (shifts all 3 sections by 3)
-5. **Display**: E1 screen shows parameter names and formatted values, updates on track/device/page changes
-6. **Section switching**: Press Section 1/2/3 buttons on E1 - knobs control that section's page
-
----
-
-## No Other E1 Configuration Needed
-
-The Electra One firmware does not need any special configuration beyond loading the preset. The controller script handles:
-- Bidirectional CC communication on Port 1
-- SysEx display updates on Port 2
-- Section switch detection via SysEx on Port 2
-- All parameter name/value display updates via SysEx `updateRuntime`
+1. Select an instrument track with Remote Controls pages
+2. **Parameters**: Turn inner knobs (A2-A5, B2-B5) — values change in Bitwig
+3. **Feedback**: Change a param in Bitwig's UI — E1 knob position updates
+4. **Navigation**: Turn corner knobs (A1=track, A6=device, B1=page, B6=bank)
+5. **Display**: E1 screen shows parameter names and values per control set
+6. **Touchscreen**: Swipe between sets — knobs rebind to that set's page

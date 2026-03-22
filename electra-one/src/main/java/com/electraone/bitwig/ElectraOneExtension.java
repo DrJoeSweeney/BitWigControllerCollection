@@ -16,29 +16,44 @@ import com.bitwig.extension.controller.api.SettableEnumValue;
 
 import static com.electraone.bitwig.ElectraOneMidiConfig.*;
 
+/**
+ * Electra One controller extension for Bitwig Studio.
+ *
+ * 3 control sets on the E1 touchscreen show 3 consecutive Remote Controls pages.
+ * The 12 physical knobs control whichever set is active on the touchscreen.
+ * Swiping between sets on the E1 triggers a section switch via SysEx.
+ *
+ * Per control set (2x6 grid):
+ *   Row A: [A1 Track] [A2 P0] [A3 P1] [A4 P2] [A5 P3] [A6 Device]
+ *   Row B: [B1 Page]  [B2 P4] [B3 P5] [B4 P6] [B5 P7] [B6 Bank]
+ */
 public class ElectraOneExtension extends ControllerExtension
 {
    private ControllerHost host;
    private MidiOut midiOut;
-   private MidiOut ctrlOut;
    private ElectraOneSysEx sysEx;
 
    private CursorTrack cursorTrack;
    private CursorDevice cursorDevice;
+
+   // 3 independent page cursors — one per E1 control set
    private CursorRemoteControlsPage[] sectionPages;
 
    private AbsoluteHardwareKnob[] paramKnobs;
    private HardwareBinding[] paramBindings;
 
+   // Which E1 control set is active (0-2), set by touchscreen SysEx
    private int activeSection = 0;
+
+   // Base page index — section 0 shows basePage, section 1 shows basePage+1, etc.
    private int basePage = 0;
 
-   // Dirty tracking — per-section for display, active-section-only for CC feedback
+   // Dirty tracking
    private boolean needsFullUpdate = true;
-   private final boolean[][] sectionDisplayDirty = new boolean[NUM_SECTIONS][NUM_PARAMS];
+   private final boolean[][] displayDirty = new boolean[NUM_SECTIONS][NUM_PARAMS];
    private final boolean[] paramValueDirty = new boolean[NUM_PARAMS];
 
-   // Suppress CC echo: set when E1 hardware sends CC, cleared in flush
+   // Suppress CC echo when hardware originates the change
    private final boolean[] paramFromHardware = new boolean[NUM_PARAMS];
 
    // Cached values for change detection
@@ -46,10 +61,10 @@ public class ElectraOneExtension extends ControllerExtension
    private final String[][] lastSentName = new String[NUM_SECTIONS][NUM_PARAMS];
    private final String[][] lastSentDisplayValue = new String[NUM_SECTIONS][NUM_PARAMS];
 
-   // Cached state for display
+   // Cached nav state
    private String cachedTrackName = "";
    private String cachedDeviceName = "";
-   private final String[][] cachedPageNames = new String[NUM_SECTIONS][];
+   private String[] cachedPageNames;
 
    // 14-bit mode
    private boolean use14Bit = false;
@@ -57,13 +72,17 @@ public class ElectraOneExtension extends ControllerExtension
 
    // Page filter — when enabled, only pages containing "E1" are navigable
    private boolean filterE1Pages = false;
-   private int[] filteredPageIndices;  // actual page indices that pass filter; null = no filter
+   private int[] filteredPageIndices;
 
-   // E1 preset control IDs — 12 controls per section, params are indices 1-4 and 7-10
-   // Section 1: controls 1-12, Section 2: 13-24, Section 3: 25-36
-   // Within each section: knob positions map to control offsets 0-11
-   // Inner param knobs are at offsets 1,2,3,4 (row1) and 7,8,9,10 (row2) — 0-indexed within section
+   // E1 control ID offsets within a 12-control section (0-indexed)
+   // A2-A5 = offsets 1-4, B2-B5 = offsets 7-10
    private static final int[] PARAM_CONTROL_OFFSET = { 1, 2, 3, 4, 7, 8, 9, 10 };
+
+   // Nav knob offsets within a section (0-indexed)
+   private static final int NAV_TRACK_OFFSET  = 0;   // A1
+   private static final int NAV_DEVICE_OFFSET = 5;   // A6
+   private static final int NAV_PAGE_OFFSET   = 6;   // B1
+   private static final int NAV_BANK_OFFSET   = 11;  // B6
 
    protected ElectraOneExtension(
          ElectraOneExtensionDefinition definition, ControllerHost host)
@@ -81,7 +100,7 @@ public class ElectraOneExtension extends ControllerExtension
       MidiIn midiIn = host.getMidiInPort(PORT_MIDI);
       MidiIn ctrlIn = host.getMidiInPort(PORT_CTRL);
       midiOut = host.getMidiOutPort(PORT_MIDI);
-      ctrlOut = host.getMidiOutPort(PORT_CTRL);
+      MidiOut ctrlOut = host.getMidiOutPort(PORT_CTRL);
       sysEx = new ElectraOneSysEx(ctrlOut);
 
       // Preference: 7-bit vs 14-bit
@@ -92,6 +111,7 @@ public class ElectraOneExtension extends ControllerExtension
          use14Bit = "14-bit".equals(val);
          host.println("CC resolution: " + val);
          needsFullUpdate = true;
+         host.requestFlush();
       });
 
       // Preference: page filter
@@ -117,15 +137,17 @@ public class ElectraOneExtension extends ControllerExtension
       cursorTrack.name().addValueObserver(name -> {
          cachedTrackName = name;
          needsFullUpdate = true;
+         host.requestFlush();
       });
 
       cursorDevice.name().markInterested();
       cursorDevice.name().addValueObserver(name -> {
          cachedDeviceName = name;
          needsFullUpdate = true;
+         host.requestFlush();
       });
 
-      // 3 section pages — independent cursors on the same device
+      // 3 section pages — independent cursors on the same device, showing consecutive pages
       sectionPages = new CursorRemoteControlsPage[NUM_SECTIONS];
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
@@ -137,13 +159,18 @@ public class ElectraOneExtension extends ControllerExtension
          final int section = s;
          sectionPages[s].selectedPageIndex().addValueObserver(index -> {
             needsFullUpdate = true;
+            host.requestFlush();
          });
          sectionPages[s].pageNames().addValueObserver(names -> {
-            cachedPageNames[section] = names;
-            // Recompute filter when section 0 reports (all sections share same page list)
-            if (section == 0) recomputeFilteredPages();
-            // Set this section's page to its expected index
+            // All sections share the same page list; use section 0 as canonical
+            if (section == 0)
+            {
+               cachedPageNames = names;
+               recomputeFilteredPages();
+            }
             updateSectionPageIndex(section);
+            needsFullUpdate = true;
+            host.requestFlush();
          });
 
          for (int p = 0; p < NUM_PARAMS; p++)
@@ -159,23 +186,22 @@ public class ElectraOneExtension extends ControllerExtension
                if (sec == activeSection) paramValueDirty[pi] = true;
             });
             param.name().addValueObserver(n -> {
-               sectionDisplayDirty[sec][pi] = true;
+               displayDirty[sec][pi] = true;
             });
             param.displayedValue().addValueObserver(dv -> {
-               sectionDisplayDirty[sec][pi] = true;
+               displayDirty[sec][pi] = true;
             });
          }
       }
 
-      // Set initial section page indices
+      // Set initial page indices: section 0 = page 0, section 1 = page 1, section 2 = page 2
       updateAllSectionPageIndices();
 
-      // Hardware surface
+      // Hardware surface — parameter knobs (absolute CC)
       HardwareSurface surface = host.createHardwareSurface();
-
-      // Parameter knobs (absolute, 7-bit by default)
       paramKnobs = new AbsoluteHardwareKnob[NUM_PARAMS];
       paramBindings = new HardwareBinding[NUM_PARAMS];
+
       for (int i = 0; i < NUM_PARAMS; i++)
       {
          paramKnobs[i] = surface.createAbsoluteHardwareKnob("PARAM_" + i);
@@ -184,14 +210,13 @@ public class ElectraOneExtension extends ControllerExtension
       }
       bindParamKnobs();
 
-      // Raw MIDI callback for navigation knobs + 14-bit LSB handling
+      // Raw MIDI callback for navigation knobs + 14-bit LSB
       midiIn.setMidiCallback((int status, int data1, int data2) -> {
-         // Only handle CC messages on our channel
          if ((status & 0xF0) != 0xB0) return;
          if ((status & 0x0F) != CHANNEL) return;
 
          // Navigation knobs — relative 2's complement
-         // Values 1-63 = clockwise (increment), 65-127 = counter-clockwise (decrement)
+         // 1-63 = clockwise (forward), 65-127 = counter-clockwise (backward)
          if (data1 == CC_TRACK)
          {
             if (data2 < 64) cursorTrack.selectNext();
@@ -206,66 +231,18 @@ public class ElectraOneExtension extends ControllerExtension
          }
          if (data1 == CC_PAGE)
          {
-            if (filteredPageIndices != null)
-            {
-               // Navigate to next/prev filtered page for active section
-               int currentActual = sectionPages[activeSection].selectedPageIndex().get();
-               if (data2 < 64)
-               {
-                  for (int fi : filteredPageIndices)
-                  {
-                     if (fi > currentActual)
-                     {
-                        sectionPages[activeSection].selectedPageIndex().set(fi);
-                        break;
-                     }
-                  }
-               }
-               else
-               {
-                  for (int j = filteredPageIndices.length - 1; j >= 0; j--)
-                  {
-                     if (filteredPageIndices[j] < currentActual)
-                     {
-                        sectionPages[activeSection].selectedPageIndex().set(
-                           filteredPageIndices[j]);
-                        break;
-                     }
-                  }
-               }
-            }
-            else
-            {
-               if (data2 < 64) sectionPages[activeSection].selectNextPage(false);
-               else sectionPages[activeSection].selectPreviousPage(false);
-            }
+            // Shift base page by 1 — all 3 sections move together
+            navigateBasePage(data2 < 64 ? 1 : -1);
             return;
          }
          if (data1 == CC_BANK)
          {
-            int maxBase = filteredPageIndices != null
-               ? filteredPageIndices.length : Integer.MAX_VALUE;
-            if (data2 < 64)
-            {
-               if (basePage + NUM_SECTIONS < maxBase)
-               {
-                  basePage += NUM_SECTIONS;
-                  updateAllSectionPageIndices();
-                  needsFullUpdate = true;
-                  host.requestFlush();
-               }
-            }
-            else if (basePage >= NUM_SECTIONS)
-            {
-               basePage -= NUM_SECTIONS;
-               updateAllSectionPageIndices();
-               needsFullUpdate = true;
-               host.requestFlush();
-            }
+            // Jump by NUM_SECTIONS pages (one full screen's worth)
+            navigateBasePage(data2 < 64 ? NUM_SECTIONS : -NUM_SECTIONS);
             return;
          }
 
-         // Parameter CC handling — mark as hardware-originated to suppress echo
+         // Parameter CC — mark hardware-originated to suppress echo in flush
          for (int i = 0; i < NUM_PARAMS; i++)
          {
             if (data1 == PARAM_CC_MSB[i])
@@ -274,13 +251,12 @@ public class ElectraOneExtension extends ControllerExtension
                if (use14Bit)
                {
                   pendingMSB[i] = data2;
-                  return; // Wait for LSB
+                  return;
                }
-               return; // 7-bit: hardware surface binding handles value
+               return;
             }
             if (use14Bit && data1 == PARAM_CC_LSB[i])
             {
-               // Combine with last MSB to form 14-bit value
                int combined = (pendingMSB[i] << 7) | data2;
                double normalized = combined / 16383.0;
                sectionPages[activeSection].getParameter(i).set(normalized);
@@ -289,7 +265,7 @@ public class ElectraOneExtension extends ControllerExtension
          }
       });
 
-      // SysEx callback on CTRL port for section switching
+      // SysEx callback on CTRL port for E1 touchscreen section switching
       ctrlIn.setSysexCallback((String data) -> {
          int section = ElectraOneSysEx.parseSectionSwitch(data);
          if (section >= 0 && section < NUM_SECTIONS && section != activeSection)
@@ -309,7 +285,7 @@ public class ElectraOneExtension extends ControllerExtension
          {
             lastSentName[s][i] = "";
             lastSentDisplayValue[s][i] = "";
-            sectionDisplayDirty[s][i] = true;
+            displayDirty[s][i] = true;
          }
       }
       for (int i = 0; i < NUM_PARAMS; i++)
@@ -318,8 +294,11 @@ public class ElectraOneExtension extends ControllerExtension
          paramValueDirty[i] = true;
       }
 
-      host.println("Electra One initialized — 3 sections, " + NUM_PARAMS + " params per section");
+      host.println("Electra One initialized — " + NUM_SECTIONS
+         + " sections, " + NUM_PARAMS + " params each");
    }
+
+   // ── Param knob binding ──────────────────────────────────────────────
 
    private void bindParamKnobs()
    {
@@ -332,7 +311,6 @@ public class ElectraOneExtension extends ControllerExtension
 
    private void rebindParamKnobs()
    {
-      // Remove old bindings
       for (int i = 0; i < NUM_PARAMS; i++)
       {
          if (paramBindings[i] != null)
@@ -341,7 +319,6 @@ public class ElectraOneExtension extends ControllerExtension
             paramBindings[i] = null;
          }
       }
-      // Create new bindings for active section
       bindParamKnobs();
 
       // Mark all params dirty so flush sends fresh CC values
@@ -352,8 +329,40 @@ public class ElectraOneExtension extends ControllerExtension
       }
    }
 
+   // ── Page navigation ─────────────────────────────────────────────────
+
    /**
-    * Resolve the actual page index for a section, respecting the page filter.
+    * Shift the base page by delta, respecting page filter and bounds.
+    * All 3 sections move together.
+    */
+   private void navigateBasePage(int delta)
+   {
+      int totalPages = getNavigablePageCount();
+      if (totalPages <= 0) return;
+
+      int newBase = basePage + delta;
+      // Clamp: base must be >= 0 and section 0 must have a valid page
+      if (newBase < 0) newBase = 0;
+      if (newBase >= totalPages) newBase = totalPages - 1;
+
+      if (newBase != basePage)
+      {
+         basePage = newBase;
+         updateAllSectionPageIndices();
+         needsFullUpdate = true;
+         host.requestFlush();
+      }
+   }
+
+   private int getNavigablePageCount()
+   {
+      if (filteredPageIndices != null) return filteredPageIndices.length;
+      if (cachedPageNames != null) return cachedPageNames.length;
+      return 0;
+   }
+
+   /**
+    * Resolve the actual page index for a section.
     * @return actual page index, or -1 if out of range
     */
    private int resolvePageIndex(int section)
@@ -365,15 +374,16 @@ public class ElectraOneExtension extends ControllerExtension
             return filteredPageIndices[logicalIndex];
          return -1;
       }
-      return logicalIndex;
+      if (cachedPageNames != null && logicalIndex >= 0
+            && logicalIndex < cachedPageNames.length)
+         return logicalIndex;
+      return -1;
    }
 
    private void updateSectionPageIndex(int section)
    {
       int actualIndex = resolvePageIndex(section);
-      if (actualIndex < 0) return;
-      String[] names = cachedPageNames[section];
-      if (names != null && actualIndex < names.length)
+      if (actualIndex >= 0)
       {
          sectionPages[section].selectedPageIndex().set(actualIndex);
       }
@@ -387,10 +397,6 @@ public class ElectraOneExtension extends ControllerExtension
       }
    }
 
-   /**
-    * Rebuild the filtered page index list from section 0's cached page names.
-    * When filter is off, sets filteredPageIndices to null (no filtering).
-    */
    private void recomputeFilteredPages()
    {
       if (!filterE1Pages)
@@ -398,38 +404,37 @@ public class ElectraOneExtension extends ControllerExtension
          filteredPageIndices = null;
          return;
       }
-      String[] names = cachedPageNames[0];
-      if (names == null)
+      if (cachedPageNames == null)
       {
          filteredPageIndices = new int[0];
          return;
       }
       int count = 0;
-      for (String name : names)
+      for (String name : cachedPageNames)
       {
          if (name != null && name.contains("E1")) count++;
       }
       filteredPageIndices = new int[count];
       int idx = 0;
-      for (int i = 0; i < names.length; i++)
+      for (int i = 0; i < cachedPageNames.length; i++)
       {
-         if (names[i] != null && names[i].contains("E1"))
+         if (cachedPageNames[i] != null && cachedPageNames[i].contains("E1"))
          {
             filteredPageIndices[idx++] = i;
          }
       }
    }
 
+   // ── Flush cycle ─────────────────────────────────────────────────────
+
    @Override
    public void flush()
    {
-      // Stage 1: Full display refresh
+      // Stage 1: Full display refresh (track/device/page changed)
       if (needsFullUpdate)
       {
          needsFullUpdate = false;
          sendFullDisplayUpdate();
-
-         // Mark all active section params dirty for CC feedback
          for (int i = 0; i < NUM_PARAMS; i++)
          {
             paramValueDirty[i] = true;
@@ -441,9 +446,9 @@ public class ElectraOneExtension extends ControllerExtension
       {
          for (int i = 0; i < NUM_PARAMS; i++)
          {
-            if (sectionDisplayDirty[s][i])
+            if (displayDirty[s][i])
             {
-               sectionDisplayDirty[s][i] = false;
+               displayDirty[s][i] = false;
                RemoteControl param = sectionPages[s].getParameter(i);
                String name = param.name().get();
                String displayValue = param.displayedValue().get();
@@ -453,15 +458,14 @@ public class ElectraOneExtension extends ControllerExtension
                {
                   lastSentName[s][i] = name;
                   lastSentDisplayValue[s][i] = displayValue;
-                  int controlId = getControlId(s, i);
-                  sysEx.sendControlUpdate(controlId, name, displayValue);
+                  sysEx.sendControlUpdate(
+                     getParamControlId(s, i), name, displayValue);
                }
             }
          }
       }
 
-      // Stage 3: CC value feedback for active section parameters
-      // Skip feedback for params that were just changed by hardware input (suppress echo)
+      // Stage 3: CC value feedback for active section (suppress hardware echo)
       for (int i = 0; i < NUM_PARAMS; i++)
       {
          if (paramFromHardware[i])
@@ -485,76 +489,76 @@ public class ElectraOneExtension extends ControllerExtension
       }
    }
 
+   /**
+    * Send full display update: all 3 sections x 8 params + nav labels.
+    */
    private void sendFullDisplayUpdate()
    {
-      // Send parameter names and values for all 3 sections
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
+         // Parameter names and values
          for (int i = 0; i < NUM_PARAMS; i++)
          {
             RemoteControl param = sectionPages[s].getParameter(i);
             String name = param.name().get();
             String displayValue = param.displayedValue().get();
-            int controlId = getControlId(s, i);
-
-            sysEx.sendControlUpdate(controlId, name, displayValue);
-
-            // Update cache
+            sysEx.sendControlUpdate(getParamControlId(s, i), name, displayValue);
             lastSentName[s][i] = name;
             lastSentDisplayValue[s][i] = displayValue;
          }
+
+         // Nav labels per section
+         sysEx.sendControlUpdate(getNavControlId(s, NAV_TRACK_OFFSET),
+            "Track", cachedTrackName);
+         sysEx.sendControlUpdate(getNavControlId(s, NAV_DEVICE_OFFSET),
+            "Device", cachedDeviceName);
+         sysEx.sendControlUpdate(getNavControlId(s, NAV_PAGE_OFFSET),
+            "Page", getPageName(s));
+
+         int pageCount = getNavigablePageCount();
+         int pageNum = basePage + s + 1;
+         String bankLabel = pageCount > 0
+            ? pageNum + "/" + pageCount
+            : "---";
+         sysEx.sendControlUpdate(getNavControlId(s, NAV_BANK_OFFSET),
+            "Bank", bankLabel);
       }
-
-      // Send track name to navigation controls (knob 1 area)
-      // Using control IDs for nav knobs: offset 0 (track), 5 (device), 6 (page), 11 (bank)
-      sysEx.sendControlUpdate(getNavControlId(activeSection, 0),
-         "Track", cachedTrackName);
-      sysEx.sendControlUpdate(getNavControlId(activeSection, 5),
-         "Device", cachedDeviceName);
-
-      // Send page names
-      for (int s = 0; s < NUM_SECTIONS; s++)
-      {
-         String pageName = getPageName(s);
-         sysEx.sendControlUpdate(getNavControlId(s, 6),
-            "Page", pageName);
-      }
-
-      sysEx.sendControlUpdate(getNavControlId(activeSection, 11),
-         "Bank", "Bank " + ((basePage / NUM_SECTIONS) + 1));
    }
 
+   // ── Control ID mapping ──────────────────────────────────────────────
+
    /**
-    * Get the E1 preset control ID for a parameter knob.
-    * Section 0: controls 1-12, Section 1: 13-24, Section 2: 25-36
-    * Param knobs are at offsets 1,2,3,4,7,8,9,10 within each section.
+    * E1 preset control ID for a parameter knob.
+    * Section 0: IDs 1-12, Section 1: 13-24, Section 2: 25-36.
+    * Param knobs are at offsets 1,2,3,4 (A2-A5) and 7,8,9,10 (B2-B5).
     */
-   private int getControlId(int section, int paramIndex)
+   private int getParamControlId(int section, int paramIndex)
    {
-      return (section * 12) + PARAM_CONTROL_OFFSET[paramIndex] + 1;
+      return (section * CONTROLS_PER_SECTION) + PARAM_CONTROL_OFFSET[paramIndex] + 1;
    }
 
    /**
-    * Get the E1 preset control ID for a navigation knob.
+    * E1 preset control ID for a navigation knob.
     * @param section the section (0-2)
     * @param offset the knob offset within the section (0, 5, 6, or 11)
     */
    private int getNavControlId(int section, int offset)
    {
-      return (section * 12) + offset + 1;
+      return (section * CONTROLS_PER_SECTION) + offset + 1;
    }
 
    private String getPageName(int section)
    {
       int actualIndex = resolvePageIndex(section);
-      if (actualIndex < 0) return "---";
-      String[] names = cachedPageNames[section];
-      if (names != null && actualIndex < names.length)
+      if (actualIndex >= 0 && cachedPageNames != null
+            && actualIndex < cachedPageNames.length)
       {
-         return names[actualIndex];
+         return cachedPageNames[actualIndex];
       }
       return "---";
    }
+
+   // ── CC output ───────────────────────────────────────────────────────
 
    private void sendParamCC(int paramIndex, double value)
    {
@@ -576,14 +580,16 @@ public class ElectraOneExtension extends ControllerExtension
    @Override
    public void exit()
    {
-      // Clear the E1 display by sending empty names/values
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
          for (int i = 0; i < NUM_PARAMS; i++)
          {
-            int controlId = getControlId(s, i);
-            sysEx.sendControlUpdate(controlId, "", "");
+            sysEx.sendControlUpdate(getParamControlId(s, i), "", "");
          }
+         sysEx.sendControlUpdate(getNavControlId(s, NAV_TRACK_OFFSET), "", "");
+         sysEx.sendControlUpdate(getNavControlId(s, NAV_DEVICE_OFFSET), "", "");
+         sysEx.sendControlUpdate(getNavControlId(s, NAV_PAGE_OFFSET), "", "");
+         sysEx.sendControlUpdate(getNavControlId(s, NAV_BANK_OFFSET), "", "");
       }
       host.println("Electra One exited");
    }

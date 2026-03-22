@@ -22,7 +22,7 @@ public class ElectraOneSysEx
     * Send an updateRuntime SysEx message with JSON payload to update
     * a control's name and displayed value on the E1 screen.
     *
-    * @param controlId the E1 control ID (from preset)
+    * @param controlId the E1 control ID (from preset, 1-36)
     * @param name      parameter name to display
     * @param value     formatted parameter value to display
     */
@@ -46,7 +46,6 @@ public class ElectraOneSysEx
       for (int i = 0; i < json.length(); i++)
       {
          char c = json.charAt(i);
-         // SysEx data bytes must be 0-127; ASCII printable chars are fine
          int b = c & 0x7F;
          sb.append(String.format("%02X ", b));
       }
@@ -56,8 +55,37 @@ public class ElectraOneSysEx
    }
 
    /**
+    * Parse a section switch SysEx message from the E1 touchscreen.
+    * Expected format: F0 00 21 45 7E 07 [01|02|03] F7
+    * @param data hex string from setSysexCallback
+    * @return section number (0-2), or -1 if not a section switch message
+    */
+   public static int parseSectionSwitch(String data)
+   {
+      String hex = data.replaceAll("\\s+", "").toLowerCase();
+
+      if (!hex.startsWith("f00021457e07"))
+         return -1;
+
+      if (hex.length() < 16)
+         return -1;
+
+      String sectionHex = hex.substring(12, 14);
+      try
+      {
+         int section = Integer.parseInt(sectionHex, 16);
+         if (section >= 1 && section <= 3)
+            return section - 1;
+      }
+      catch (NumberFormatException e)
+      {
+         // Not a valid section
+      }
+      return -1;
+   }
+
+   /**
     * Escape special characters for JSON strings.
-    * Replaces backslash, double-quote, and control characters.
     */
    private static String escapeJson(String s)
    {
@@ -82,38 +110,5 @@ public class ElectraOneSysEx
          }
       }
       return sb.toString();
-   }
-
-   /**
-    * Parse a section switch SysEx message.
-    * Expected format: F0 00 21 45 7E 07 [01|02|03] F7
-    * @param data hex string from setSysexCallback
-    * @return section number (0-2), or -1 if not a section switch message
-    */
-   public static int parseSectionSwitch(String data)
-   {
-      // Normalize: remove spaces, lowercase
-      String hex = data.replaceAll("\\s+", "").toLowerCase();
-
-      // Check prefix: f0002145 7e 07
-      if (!hex.startsWith("f00021457e07"))
-         return -1;
-
-      if (hex.length() < 16)
-         return -1;
-
-      // Extract section byte (2 hex chars after prefix)
-      String sectionHex = hex.substring(12, 14);
-      try
-      {
-         int section = Integer.parseInt(sectionHex, 16);
-         if (section >= 1 && section <= 3)
-            return section - 1; // Convert to 0-indexed
-      }
-      catch (NumberFormatException e)
-      {
-         // Not a valid section
-      }
-      return -1;
    }
 }

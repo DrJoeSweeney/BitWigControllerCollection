@@ -24,7 +24,7 @@ This project develops custom controller extensions for Bitwig Studio.
 
 - **`faderfox-pc12/`** — Faderfox PC12: follows the selected device on the current track. One instrument at a time.
 - **`faderfox-pc12-multi/`** — Faderfox PC12 MultiInstrument: scans first 16 tracks, controls multiple instruments simultaneously via channel-based targeting (`FFn CHc`). Only enable one PC12 variant at a time.
-- **`electra-one/`** — Electra One: follows selected device, maps 8 inner knobs to Remote Controls parameters, 4 corner knobs for navigation (track/device/page/bank). 3-section display shows consecutive control pages. Bidirectional: SysEx display updates + CC value feedback. Supports 7-bit and 14-bit CC. Optional "E1 Only" page filter to restrict navigation to pages containing "E1" in their name. 2 MIDI ports (MIDI + CTRL).
+- **`electra-one/`** — Electra One: follows selected device, 3 touchscreen control sets show 3 consecutive Remote Controls pages. 8 inner knobs (A2-A5, B2-B5) per set for parameters, 4 corner knobs for navigation (A1=track, A6=device, B1=page, B6=bank). Bidirectional SysEx display updates + CC value feedback. Supports 7-bit and 14-bit CC. Optional "E1 Only" page filter. 2 MIDI ports (MIDI + CTRL).
 
 ## Skills
 
