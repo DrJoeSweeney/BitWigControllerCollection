@@ -8,16 +8,26 @@ import com.bitwig.extension.controller.api.MidiOut;
  * All SysEx is sent on port 1 (CTRL).
  *
  * Manufacturer ID: 0x00 0x21 0x45
- * Update runtime command: F0 00 21 45 14 07 <JSON> F7
+ *
+ * Control update (name/color):  F0 00 21 45 14 07 [id_lo] [id_hi] {json} F7
+ * Value label update:           F0 00 21 45 14 0E [id_lo] [id_hi] 00 <text> F7
+ * Repaint enable/disable:       F0 00 21 45 7F 7A [00|01] F7
  */
 public class ElectraOneSysEx
 {
    private final MidiOut ctrlOut;
    private final ControllerHost host;
 
-   // Log first N SysEx sends to verify format, then go quiet
    private int sendCount = 0;
    private static final int LOG_LIMIT = 10;
+
+   // SysEx header (hex)
+   private static final String HDR = "f0002145";
+
+   // Command bytes (hex)
+   private static final String CMD_CONTROL_UPDATE    = "1407";  // name, color, visible
+   private static final String CMD_VALUE_LABEL       = "140e";  // value text
+   private static final String CMD_REPAINT_ENABLED   = "7f7a";  // enable/disable repaint
 
    public ElectraOneSysEx(MidiOut ctrlOut, ControllerHost host)
    {
@@ -26,53 +36,116 @@ public class ElectraOneSysEx
    }
 
    /**
-    * Send an updateRuntime SysEx message to update a control's name
-    * and displayed value on the E1 screen.
+    * Send a control update to set the name, and a value label update
+    * to set the displayed value text on the E1 screen.
     */
    public void sendControlUpdate(int controlId, String name, String value)
    {
-      String json = "{\"controlId\":" + controlId
-         + ",\"name\":\"" + escapeJson(name)
-         + "\",\"value\":{\"id\":\"value\",\"text\":\"" + escapeJson(value) + "\"}}";
-
-      sendUpdateRuntime(json);
+      sendControlName(controlId, name);
+      sendValueLabel(controlId, value);
    }
 
    /**
-    * Send an updateRuntime SysEx message with arbitrary JSON payload.
+    * Send a control name update via 0x14 0x07 command.
+    * Format: F0 00 21 45 14 07 [id_lo] [id_hi] {"name":"..."} F7
+    */
+   public void sendControlName(int controlId, String name)
+   {
+      String json = "{\"name\":\"" + escapeJson(name) + "\"}";
+      String hex = HDR + CMD_CONTROL_UPDATE
+         + encodeControlId(controlId)
+         + asciiToHex(json) + "f7";
+
+      logSend("name", controlId, name, hex);
+      ctrlOut.sendSysex(hex);
+   }
+
+   /**
+    * Send a value label update via 0x14 0x0E command.
+    * Format: F0 00 21 45 14 0E [id_lo] [id_hi] 00 <ascii text> F7
+    * The 00 byte is the value index (first/default value slot).
+    */
+   public void sendValueLabel(int controlId, String text)
+   {
+      String hex = HDR + CMD_VALUE_LABEL
+         + encodeControlId(controlId)
+         + "00"  // value index
+         + asciiToHex(text) + "f7";
+
+      logSend("value", controlId, text, hex);
+      ctrlOut.sendSysex(hex);
+   }
+
+   /**
+    * Enable or disable E1 display repainting.
+    * Call setRepaintEnabled(false) before batch updates,
+    * then setRepaintEnabled(true) after to trigger a single repaint.
+    */
+   public void setRepaintEnabled(boolean enabled)
+   {
+      String hex = HDR + CMD_REPAINT_ENABLED
+         + (enabled ? "01" : "00") + "f7";
+      ctrlOut.sendSysex(hex);
+   }
+
+   /**
+    * Send an arbitrary updateRuntime JSON payload (legacy format).
     */
    public void sendUpdateRuntime(String json)
    {
-      // Build compact hex string: F0 00 21 45 14 07 <json> F7
-      // 0x14 = Data command, 0x07 = RuntimeInfo subcommand
-      StringBuilder sb = new StringBuilder();
-      sb.append("f00021451407");
+      String hex = HDR + CMD_CONTROL_UPDATE
+         + asciiToHex(json) + "f7";
 
-      for (int i = 0; i < json.length(); i++)
-      {
-         char c = json.charAt(i);
-         int b = c & 0x7F;
-         sb.append(String.format("%02x", b));
-      }
-      sb.append("f7");
-
-      String sysexHex = sb.toString();
-
-      // Log first few sends so we can verify the SysEx format
       sendCount++;
       if (sendCount <= LOG_LIMIT)
       {
          host.println("SysEx SEND #" + sendCount + " json=" + json);
-         host.println("  hex=" + sysexHex.substring(0, Math.min(120, sysexHex.length()))
-            + (sysexHex.length() > 120 ? "..." : ""));
+         host.println("  hex=" + hex.substring(0, Math.min(120, hex.length()))
+            + (hex.length() > 120 ? "..." : ""));
       }
-
-      // Send on CTRL port only (port 1)
-      ctrlOut.sendSysex(sysexHex);
+      ctrlOut.sendSysex(hex);
    }
 
    /**
-    * Parse a section switch SysEx message from the E1 touchscreen.
+    * Encode a control ID as two 7-bit bytes (little-endian).
+    * Returns 4-char hex string (2 bytes).
+    */
+   private static String encodeControlId(int controlId)
+   {
+      int lo = controlId & 0x7F;
+      int hi = controlId >> 7;
+      return String.format("%02x%02x", lo, hi);
+   }
+
+   /**
+    * Convert an ASCII string to hex bytes.
+    */
+   private static String asciiToHex(String s)
+   {
+      if (s == null || s.isEmpty()) return "";
+      StringBuilder sb = new StringBuilder(s.length() * 2);
+      for (int i = 0; i < s.length(); i++)
+      {
+         int b = s.charAt(i) & 0x7F;
+         sb.append(String.format("%02x", b));
+      }
+      return sb.toString();
+   }
+
+   private void logSend(String type, int controlId, String text, String hex)
+   {
+      sendCount++;
+      if (sendCount <= LOG_LIMIT)
+      {
+         host.println("SysEx SEND #" + sendCount + " " + type
+            + " id=" + controlId + " \"" + text + "\"");
+         host.println("  hex=" + hex.substring(0, Math.min(100, hex.length()))
+            + (hex.length() > 100 ? "..." : ""));
+      }
+   }
+
+   /**
+    * Parse a section switch SysEx from the E1 touchscreen.
     * Expected format: F0 00 21 45 7E 07 [01|02|03] F7
     */
    public static int parseSectionSwitch(String data)
@@ -110,14 +183,11 @@ public class ElectraOneSysEx
          {
             case '"':  sb.append("\\\""); break;
             case '\\': sb.append("\\\\"); break;
-            case '\n': sb.append("\\n"); break;
-            case '\r': sb.append("\\r"); break;
-            case '\t': sb.append("\\t"); break;
             default:
-               if (c < 0x20)
-                  sb.append(' ');
-               else
+               if (c >= 0x20 && c < 0x7F)
                   sb.append(c);
+               else
+                  sb.append(' ');
                break;
          }
       }

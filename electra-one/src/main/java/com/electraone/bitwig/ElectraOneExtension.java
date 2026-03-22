@@ -314,12 +314,10 @@ public class ElectraOneExtension extends ControllerExtension
          paramValueDirty[i] = true;
       }
 
-      // Test SysEx immediately — send a simple name update to control 1
-      host.println("=== Sending SysEx test: name-only update to control 1 ===");
-      sysEx.sendUpdateRuntime("{\"controlId\":1,\"name\":\"TEST\"}");
-      host.println("=== Sending SysEx test: value-only update to control 1 ===");
-      sysEx.sendUpdateRuntime("{\"controlId\":1,\"value\":{\"id\":\"value\",\"text\":\"Hello\"}}");
-      host.println("=== Sending SysEx test: combined update to control 2 ===");
+      // Test SysEx immediately — verify E1 display updates
+      host.println("=== Sending SysEx test to control 1 and 2 ===");
+      sysEx.sendControlName(1, "TEST");
+      sysEx.sendValueLabel(1, "Hello");
       sysEx.sendControlUpdate(2, "MyParam", "42%");
 
       // Delayed initial update
@@ -496,6 +494,9 @@ public class ElectraOneExtension extends ControllerExtension
          + "\" device=\"" + cachedDeviceName + "\" basePage=" + basePage
          + " deviceExists=" + cursorDevice.exists().get());
 
+      // Disable repaint during batch update for performance
+      sysEx.setRepaintEnabled(false);
+
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
          for (int i = 0; i < NUM_PARAMS; i++)
@@ -530,6 +531,9 @@ public class ElectraOneExtension extends ControllerExtension
             : "---";
          sysEx.sendControlUpdate(bankId, "Bank", bankLabel);
       }
+
+      // Re-enable repaint to trigger a single screen refresh
+      sysEx.setRepaintEnabled(true);
    }
 
    // ── Control ID mapping ──────────────────────────────────────────────
