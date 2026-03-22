@@ -1,14 +1,11 @@
 package com.electraone.bitwig;
 
 import com.bitwig.extension.controller.ControllerExtension;
-import com.bitwig.extension.controller.api.AbsoluteHardwareKnob;
 import com.bitwig.extension.controller.api.ControllerHost;
 import com.bitwig.extension.controller.api.CursorDevice;
 import com.bitwig.extension.controller.api.CursorDeviceFollowMode;
 import com.bitwig.extension.controller.api.CursorRemoteControlsPage;
 import com.bitwig.extension.controller.api.CursorTrack;
-import com.bitwig.extension.controller.api.HardwareBinding;
-import com.bitwig.extension.controller.api.HardwareSurface;
 import com.bitwig.extension.controller.api.MidiIn;
 import com.bitwig.extension.controller.api.MidiOut;
 import com.bitwig.extension.controller.api.RemoteControl;
@@ -26,6 +23,9 @@ import static com.electraone.bitwig.ElectraOneMidiConfig.*;
  * Per control set (2x6 grid):
  *   Row A: [A1 Track] [A2 P0] [A3 P1] [A4 P2] [A5 P3] [A6 Device]
  *   Row B: [B1 Page]  [B2 P4] [B3 P5] [B4 P6] [B5 P7] [B6 Bank]
+ *
+ * Parameter values are handled directly via MIDI callback (no hardware surface
+ * bindings) to ensure correct CC-to-parameter routing regardless of CC numbers.
  */
 public class ElectraOneExtension extends ControllerExtension
 {
@@ -38,9 +38,6 @@ public class ElectraOneExtension extends ControllerExtension
 
    // 3 independent page cursors — one per E1 control set
    private CursorRemoteControlsPage[] sectionPages;
-
-   private AbsoluteHardwareKnob[] paramKnobs;
-   private HardwareBinding[] paramBindings;
 
    // Which E1 control set is active (0-2), set by touchscreen SysEx
    private int activeSection = 0;
@@ -197,20 +194,12 @@ public class ElectraOneExtension extends ControllerExtension
       // Set initial page indices: section 0 = page 0, section 1 = page 1, section 2 = page 2
       updateAllSectionPageIndices();
 
-      // Hardware surface — parameter knobs (absolute CC)
-      HardwareSurface surface = host.createHardwareSurface();
-      paramKnobs = new AbsoluteHardwareKnob[NUM_PARAMS];
-      paramBindings = new HardwareBinding[NUM_PARAMS];
-
-      for (int i = 0; i < NUM_PARAMS; i++)
-      {
-         paramKnobs[i] = surface.createAbsoluteHardwareKnob("PARAM_" + i);
-         paramKnobs[i].setAdjustValueMatcher(
-            midiIn.createAbsoluteCCValueMatcher(CHANNEL, PARAM_CC_MSB[i]));
-      }
-      bindParamKnobs();
-
-      // Raw MIDI callback for navigation knobs + 14-bit LSB
+      // Raw MIDI callback handles ALL CC input:
+      // - Navigation knobs (relative 2's complement)
+      // - Parameter knobs (absolute, routed by CC → param index mapping)
+      // - 14-bit LSB handling
+      // We do NOT use hardware surface bindings because Bitwig may auto-map
+      // CCs by number (CC 7 → param 7) instead of respecting our intended routing.
       midiIn.setMidiCallback((int status, int data1, int data2) -> {
          if ((status & 0xF0) != 0xB0) return;
          if ((status & 0x0F) != CHANNEL) return;
@@ -231,18 +220,16 @@ public class ElectraOneExtension extends ControllerExtension
          }
          if (data1 == CC_PAGE)
          {
-            // Shift base page by 1 — all 3 sections move together
             navigateBasePage(data2 < 64 ? 1 : -1);
             return;
          }
          if (data1 == CC_BANK)
          {
-            // Jump by NUM_SECTIONS pages (one full screen's worth)
             navigateBasePage(data2 < 64 ? NUM_SECTIONS : -NUM_SECTIONS);
             return;
          }
 
-         // Parameter CC — mark hardware-originated to suppress echo in flush
+         // Parameter knobs — map CC number to param index and set value directly
          for (int i = 0; i < NUM_PARAMS; i++)
          {
             if (data1 == PARAM_CC_MSB[i])
@@ -251,8 +238,11 @@ public class ElectraOneExtension extends ControllerExtension
                if (use14Bit)
                {
                   pendingMSB[i] = data2;
-                  return;
+                  return; // Wait for LSB
                }
+               // 7-bit: set parameter value directly
+               double normalized = data2 / 127.0;
+               sectionPages[activeSection].getParameter(i).set(normalized);
                return;
             }
             if (use14Bit && data1 == PARAM_CC_LSB[i])
@@ -267,12 +257,18 @@ public class ElectraOneExtension extends ControllerExtension
 
       // SysEx callback on CTRL port for E1 touchscreen section switching
       ctrlIn.setSysexCallback((String data) -> {
+         host.println("SysEx received: " + data);
          int section = ElectraOneSysEx.parseSectionSwitch(data);
          if (section >= 0 && section < NUM_SECTIONS && section != activeSection)
          {
             host.println("Section switch: " + (section + 1));
             activeSection = section;
-            rebindParamKnobs();
+            // Mark all params dirty so flush sends fresh CC values for new section
+            for (int i = 0; i < NUM_PARAMS; i++)
+            {
+               paramValueDirty[i] = true;
+               lastSentValue[i] = -1;
+            }
             needsFullUpdate = true;
             host.requestFlush();
          }
@@ -294,39 +290,16 @@ public class ElectraOneExtension extends ControllerExtension
          paramValueDirty[i] = true;
       }
 
+      // Schedule a delayed full update to ensure initial display state is sent
+      // after the E1 has finished initializing
+      host.scheduleTask(() -> {
+         host.println("Sending delayed initial display update");
+         needsFullUpdate = true;
+         host.requestFlush();
+      }, 2000);
+
       host.println("Electra One initialized — " + NUM_SECTIONS
          + " sections, " + NUM_PARAMS + " params each");
-   }
-
-   // ── Param knob binding ──────────────────────────────────────────────
-
-   private void bindParamKnobs()
-   {
-      for (int i = 0; i < NUM_PARAMS; i++)
-      {
-         paramBindings[i] = paramKnobs[i].addBinding(
-            sectionPages[activeSection].getParameter(i));
-      }
-   }
-
-   private void rebindParamKnobs()
-   {
-      for (int i = 0; i < NUM_PARAMS; i++)
-      {
-         if (paramBindings[i] != null)
-         {
-            paramBindings[i].removeBinding();
-            paramBindings[i] = null;
-         }
-      }
-      bindParamKnobs();
-
-      // Mark all params dirty so flush sends fresh CC values
-      for (int i = 0; i < NUM_PARAMS; i++)
-      {
-         paramValueDirty[i] = true;
-         lastSentValue[i] = -1;
-      }
    }
 
    // ── Page navigation ─────────────────────────────────────────────────
@@ -341,7 +314,6 @@ public class ElectraOneExtension extends ControllerExtension
       if (totalPages <= 0) return;
 
       int newBase = basePage + delta;
-      // Clamp: base must be >= 0 and section 0 must have a valid page
       if (newBase < 0) newBase = 0;
       if (newBase >= totalPages) newBase = totalPages - 1;
 
@@ -458,8 +430,8 @@ public class ElectraOneExtension extends ControllerExtension
                {
                   lastSentName[s][i] = name;
                   lastSentDisplayValue[s][i] = displayValue;
-                  sysEx.sendControlUpdate(
-                     getParamControlId(s, i), name, displayValue);
+                  int controlId = getParamControlId(s, i);
+                  sysEx.sendControlUpdate(controlId, name, displayValue);
                }
             }
          }
@@ -494,6 +466,9 @@ public class ElectraOneExtension extends ControllerExtension
     */
    private void sendFullDisplayUpdate()
    {
+      host.println("sendFullDisplayUpdate: track=" + cachedTrackName
+         + " device=" + cachedDeviceName + " basePage=" + basePage);
+
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
          // Parameter names and values
@@ -502,26 +477,33 @@ public class ElectraOneExtension extends ControllerExtension
             RemoteControl param = sectionPages[s].getParameter(i);
             String name = param.name().get();
             String displayValue = param.displayedValue().get();
-            sysEx.sendControlUpdate(getParamControlId(s, i), name, displayValue);
+            int controlId = getParamControlId(s, i);
+            host.println("  S" + s + " P" + i + " id=" + controlId
+               + " name=\"" + name + "\" val=\"" + displayValue + "\"");
+            sysEx.sendControlUpdate(controlId, name, displayValue);
             lastSentName[s][i] = name;
             lastSentDisplayValue[s][i] = displayValue;
          }
 
          // Nav labels per section
-         sysEx.sendControlUpdate(getNavControlId(s, NAV_TRACK_OFFSET),
-            "Track", cachedTrackName);
-         sysEx.sendControlUpdate(getNavControlId(s, NAV_DEVICE_OFFSET),
-            "Device", cachedDeviceName);
-         sysEx.sendControlUpdate(getNavControlId(s, NAV_PAGE_OFFSET),
-            "Page", getPageName(s));
+         int trackId = getNavControlId(s, NAV_TRACK_OFFSET);
+         int deviceId = getNavControlId(s, NAV_DEVICE_OFFSET);
+         int pageId = getNavControlId(s, NAV_PAGE_OFFSET);
+         int bankId = getNavControlId(s, NAV_BANK_OFFSET);
+
+         host.println("  S" + s + " nav: track=" + trackId + " device=" + deviceId
+            + " page=" + pageId + " bank=" + bankId);
+
+         sysEx.sendControlUpdate(trackId, "Track", cachedTrackName);
+         sysEx.sendControlUpdate(deviceId, "Device", cachedDeviceName);
+         sysEx.sendControlUpdate(pageId, "Page", getPageName(s));
 
          int pageCount = getNavigablePageCount();
          int pageNum = basePage + s + 1;
          String bankLabel = pageCount > 0
             ? pageNum + "/" + pageCount
             : "---";
-         sysEx.sendControlUpdate(getNavControlId(s, NAV_BANK_OFFSET),
-            "Bank", bankLabel);
+         sysEx.sendControlUpdate(bankId, "Bank", bankLabel);
       }
    }
 
