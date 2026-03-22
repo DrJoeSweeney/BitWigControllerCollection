@@ -13,15 +13,17 @@ import com.bitwig.extension.controller.api.MidiOut;
 public class ElectraOneSysEx
 {
    private final MidiOut ctrlOut;
+   private final MidiOut midiOut;
    private final ControllerHost host;
 
    // Log first N SysEx sends to verify format, then go quiet
    private int sendCount = 0;
    private static final int LOG_LIMIT = 5;
 
-   public ElectraOneSysEx(MidiOut ctrlOut, ControllerHost host)
+   public ElectraOneSysEx(MidiOut ctrlOut, MidiOut midiOut, ControllerHost host)
    {
       this.ctrlOut = ctrlOut;
+      this.midiOut = midiOut;
       this.host = host;
    }
 
@@ -43,16 +45,17 @@ public class ElectraOneSysEx
     */
    public void sendUpdateRuntime(String json)
    {
+      // Build compact hex string (no spaces, lowercase) for maximum compatibility
       StringBuilder sb = new StringBuilder();
-      sb.append("F0 00 21 45 14 07 ");
+      sb.append("f0002145140e");
 
       for (int i = 0; i < json.length(); i++)
       {
          char c = json.charAt(i);
          int b = c & 0x7F;
-         sb.append(String.format("%02X ", b));
+         sb.append(String.format("%02x", b));
       }
-      sb.append("F7");
+      sb.append("f7");
 
       String sysexHex = sb.toString();
 
@@ -65,7 +68,9 @@ public class ElectraOneSysEx
             + (sysexHex.length() > 120 ? "..." : ""));
       }
 
+      // Send on BOTH ports — one of them should be the E1 CTRL port
       ctrlOut.sendSysex(sysexHex);
+      midiOut.sendSysex(sysexHex);
    }
 
    /**

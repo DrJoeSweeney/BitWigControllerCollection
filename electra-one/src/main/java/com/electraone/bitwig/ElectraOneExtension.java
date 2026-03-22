@@ -96,7 +96,7 @@ public class ElectraOneExtension extends ControllerExtension
       MidiIn ctrlIn = host.getMidiInPort(PORT_CTRL);
       midiOut = host.getMidiOutPort(PORT_MIDI);
       MidiOut ctrlOut = host.getMidiOutPort(PORT_CTRL);
-      sysEx = new ElectraOneSysEx(ctrlOut, host);
+      sysEx = new ElectraOneSysEx(ctrlOut, midiOut, host);
 
       // Preference: 7-bit vs 14-bit
       SettableEnumValue resolutionSetting = host.getPreferences().getEnumSetting(
