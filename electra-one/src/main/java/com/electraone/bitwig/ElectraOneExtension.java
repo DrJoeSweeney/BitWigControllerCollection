@@ -165,9 +165,9 @@ public class ElectraOneExtension extends ControllerExtension
          sectionPages[s].selectedPageIndex().markInterested();
          sectionPages[s].pageNames().markInterested();
 
-         // Track total page count from section 0's page names
          if (s == 0)
          {
+            // Track total page count from section 0's page names
             sectionPages[0].pageNames().addValueObserver(names -> {
                cachedPageNames = names != null ? names : new String[0];
                pageCount = cachedPageNames.length;
@@ -178,6 +178,19 @@ public class ElectraOneExtension extends ControllerExtension
                updateAllSectionPageIndices();
                needsFullUpdate = true;
                host.requestFlush();
+            });
+
+            // Follow Bitwig UI page selection: when the user clicks a
+            // Remote Controls page in Bitwig, sync basePage so section 0
+            // shows that page and sections 1-2 show the next pages.
+            sectionPages[0].selectedPageIndex().addValueObserver(index -> {
+               if (index >= 0 && index != basePage)
+               {
+                  basePage = index;
+                  updateAllSectionPageIndices();
+                  needsFullUpdate = true;
+                  host.requestFlush();
+               }
             });
          }
 
