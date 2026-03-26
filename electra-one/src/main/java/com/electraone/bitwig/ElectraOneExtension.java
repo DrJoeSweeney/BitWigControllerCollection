@@ -70,8 +70,11 @@ public class ElectraOneExtension extends ControllerExtension
    private boolean lastNavPlaying = false;
    private final String[] lastNavPage = { "", "", "" };
 
-   // Suppress CC echo when parameter was changed from hardware
-   private final boolean[][] paramFromHardware = new boolean[NUM_SECTIONS][NUM_PARAMS];
+   // Suppress CC echo for a time window after hardware input to prevent jitter.
+   // The boolean flag covers the immediate flush; the timestamp extends suppression
+   // so that Bitwig's value settling doesn't bounce CC back to the E1.
+   private static final long ECHO_SUPPRESS_MS = 250;
+   private final long[][] lastHardwareTime = new long[NUM_SECTIONS][NUM_PARAMS];
 
    // Navigation encoder accumulators — accumulate relative ticks, fire at threshold.
    private int thresholdPage   = 10;
@@ -291,7 +294,7 @@ public class ElectraOneExtension extends ControllerExtension
          {
             if (data1 == SECTION_PARAM_CC[s][i])
             {
-               paramFromHardware[s][i] = true;
+               lastHardwareTime[s][i] = System.currentTimeMillis();
                double normalized = data2 / 127.0;
                sectionPages[s].getParameter(i).set(normalized);
                return;
@@ -384,22 +387,24 @@ public class ElectraOneExtension extends ControllerExtension
       // Navigation display updates
       updateNavDisplay();
 
-      // CC value feedback — send for ALL 3 sections (each has unique CCs)
+      // CC value feedback — send for ALL 3 sections (each has unique CCs).
+      // Suppress echo for ECHO_SUPPRESS_MS after the last hardware input
+      // to prevent feedback jitter between the E1 and Bitwig.
+      long now = System.currentTimeMillis();
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
          for (int i = 0; i < NUM_PARAMS; i++)
          {
-            if (paramFromHardware[s][i])
+            double val = sectionPages[s].getParameter(i).get();
+            int cc7 = (int) Math.round(val * 127.0);
+
+            if (now - lastHardwareTime[s][i] < ECHO_SUPPRESS_MS)
             {
-               // Suppress echo: just update cache, don't send CC back
-               paramFromHardware[s][i] = false;
-               double val = sectionPages[s].getParameter(i).get();
-               lastSentCC[s][i] = (int) Math.round(val * 127.0);
+               // Within suppression window — update cache silently
+               lastSentCC[s][i] = cc7;
                continue;
             }
 
-            double val = sectionPages[s].getParameter(i).get();
-            int cc7 = (int) Math.round(val * 127.0);
             if (cc7 != lastSentCC[s][i])
             {
                lastSentCC[s][i] = cc7;
