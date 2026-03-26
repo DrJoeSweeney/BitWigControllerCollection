@@ -74,8 +74,10 @@ public class ElectraOneExtension extends ControllerExtension
    private final boolean[][] paramFromHardware = new boolean[NUM_SECTIONS][NUM_PARAMS];
 
    // Navigation encoder accumulators — accumulate relative ticks, fire at threshold.
-   // ~10 ticks per 1/3 turn on a typical E1 encoder (30 detents/rotation).
-   private static final int NAV_THRESHOLD = 10;
+   private int thresholdPage   = 10;
+   private int thresholdTrack  = 10;
+   private int thresholdDevice = 10;
+   private int thresholdVolume = 10;
    private int accumPage   = 0;
    private int accumTrack  = 0;
    private int accumDevice = 0;
@@ -103,6 +105,23 @@ public class ElectraOneExtension extends ControllerExtension
       midiOut          = host.getMidiOutPort(PORT_MIDI);
       MidiOut ctrlOut  = host.getMidiOutPort(PORT_CTRL);
       sysEx = new ElectraOneSysEx(ctrlOut, host);
+
+      // Encoder sensitivity preferences (1 = most sensitive, 20 = slowest)
+      host.getPreferences().getNumberSetting(
+         "Page Encoder Sensitivity", "Encoder Speed", 1, 20, 1, "", 10)
+         .addValueObserver(20, val -> thresholdPage = Math.max(1, val));
+
+      host.getPreferences().getNumberSetting(
+         "Track Encoder Sensitivity", "Encoder Speed", 1, 20, 1, "", 10)
+         .addValueObserver(20, val -> thresholdTrack = Math.max(1, val));
+
+      host.getPreferences().getNumberSetting(
+         "Device Encoder Sensitivity", "Encoder Speed", 1, 20, 1, "", 10)
+         .addValueObserver(20, val -> thresholdDevice = Math.max(1, val));
+
+      host.getPreferences().getNumberSetting(
+         "Volume Encoder Sensitivity", "Encoder Speed", 1, 20, 1, "", 10)
+         .addValueObserver(20, val -> thresholdVolume = Math.max(1, val));
 
       // Transport (for play/stop toggle via B6 touch)
       transport = host.createTransport();
@@ -242,26 +261,26 @@ public class ElectraOneExtension extends ControllerExtension
       {
          case CC_PAGE:
             accumPage += relDelta;
-            while (accumPage >= NAV_THRESHOLD)  { navigatePage(1);  accumPage -= NAV_THRESHOLD; }
-            while (accumPage <= -NAV_THRESHOLD) { navigatePage(-1); accumPage += NAV_THRESHOLD; }
+            while (accumPage >= thresholdPage)  { navigatePage(1);  accumPage -= thresholdPage; }
+            while (accumPage <= -thresholdPage) { navigatePage(-1); accumPage += thresholdPage; }
             return;
 
          case CC_TRACK:
             accumTrack += relDelta;
-            while (accumTrack >= NAV_THRESHOLD)  { cursorTrack.selectNext();     accumTrack -= NAV_THRESHOLD; }
-            while (accumTrack <= -NAV_THRESHOLD) { cursorTrack.selectPrevious(); accumTrack += NAV_THRESHOLD; }
+            while (accumTrack >= thresholdTrack)  { cursorTrack.selectNext();     accumTrack -= thresholdTrack; }
+            while (accumTrack <= -thresholdTrack) { cursorTrack.selectPrevious(); accumTrack += thresholdTrack; }
             return;
 
          case CC_DEVICE:
             accumDevice += relDelta;
-            while (accumDevice >= NAV_THRESHOLD)  { cursorDevice.selectNext();     accumDevice -= NAV_THRESHOLD; }
-            while (accumDevice <= -NAV_THRESHOLD) { cursorDevice.selectPrevious(); accumDevice += NAV_THRESHOLD; }
+            while (accumDevice >= thresholdDevice)  { cursorDevice.selectNext();     accumDevice -= thresholdDevice; }
+            while (accumDevice <= -thresholdDevice) { cursorDevice.selectPrevious(); accumDevice += thresholdDevice; }
             return;
 
          case CC_VOLUME:
             accumVolume += relDelta;
-            while (accumVolume >= NAV_THRESHOLD)  { cursorTrack.volume().inc(1, 3);  accumVolume -= NAV_THRESHOLD; }
-            while (accumVolume <= -NAV_THRESHOLD) { cursorTrack.volume().inc(-1, 3); accumVolume += NAV_THRESHOLD; }
+            while (accumVolume >= thresholdVolume)  { cursorTrack.volume().inc(1, 3);  accumVolume -= thresholdVolume; }
+            while (accumVolume <= -thresholdVolume) { cursorTrack.volume().inc(-1, 3); accumVolume += thresholdVolume; }
             return;
       }
 
