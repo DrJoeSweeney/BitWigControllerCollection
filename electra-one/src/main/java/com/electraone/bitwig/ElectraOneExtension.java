@@ -73,6 +73,14 @@ public class ElectraOneExtension extends ControllerExtension
    // Suppress CC echo when parameter was changed from hardware
    private final boolean[][] paramFromHardware = new boolean[NUM_SECTIONS][NUM_PARAMS];
 
+   // Navigation encoder accumulators — accumulate relative ticks, fire at threshold.
+   // ~10 ticks per 1/3 turn on a typical E1 encoder (30 detents/rotation).
+   private static final int NAV_THRESHOLD = 10;
+   private int accumPage   = 0;
+   private int accumTrack  = 0;
+   private int accumDevice = 0;
+   private int accumVolume = 0;
+
    // SysEx heartbeat spam filter
    private int heartbeatCount = 0;
 
@@ -226,27 +234,34 @@ public class ElectraOneExtension extends ControllerExtension
       if ((status & 0xF0) != 0xB0) return;          // CC only
       if ((status & 0x0F) != CHANNEL) return;        // our channel only
 
-      // Navigation knobs — relative 2's complement
+      // Navigation knobs — relative 2's complement, with accumulator.
+      // Accumulate ticks until NAV_THRESHOLD is reached (~1/3 turn per step).
+      int relDelta = data2 < 64 ? data2 : data2 - 128;
+
       switch (data1)
       {
          case CC_PAGE:
-            navigatePage(data2 < 64 ? 1 : -1);
+            accumPage += relDelta;
+            while (accumPage >= NAV_THRESHOLD)  { navigatePage(1);  accumPage -= NAV_THRESHOLD; }
+            while (accumPage <= -NAV_THRESHOLD) { navigatePage(-1); accumPage += NAV_THRESHOLD; }
             return;
 
          case CC_TRACK:
-            if (data2 < 64) cursorTrack.selectNext();
-            else cursorTrack.selectPrevious();
+            accumTrack += relDelta;
+            while (accumTrack >= NAV_THRESHOLD)  { cursorTrack.selectNext();     accumTrack -= NAV_THRESHOLD; }
+            while (accumTrack <= -NAV_THRESHOLD) { cursorTrack.selectPrevious(); accumTrack += NAV_THRESHOLD; }
             return;
 
          case CC_DEVICE:
-            if (data2 < 64) cursorDevice.selectNext();
-            else cursorDevice.selectPrevious();
+            accumDevice += relDelta;
+            while (accumDevice >= NAV_THRESHOLD)  { cursorDevice.selectNext();     accumDevice -= NAV_THRESHOLD; }
+            while (accumDevice <= -NAV_THRESHOLD) { cursorDevice.selectPrevious(); accumDevice += NAV_THRESHOLD; }
             return;
 
          case CC_VOLUME:
-            // Relative volume adjustment
-            int increment = data2 < 64 ? data2 : data2 - 128;
-            cursorTrack.volume().inc(increment, 128);
+            accumVolume += relDelta;
+            while (accumVolume >= NAV_THRESHOLD)  { cursorTrack.volume().inc(1, 3);  accumVolume -= NAV_THRESHOLD; }
+            while (accumVolume <= -NAV_THRESHOLD) { cursorTrack.volume().inc(-1, 3); accumVolume += NAV_THRESHOLD; }
             return;
       }
 
