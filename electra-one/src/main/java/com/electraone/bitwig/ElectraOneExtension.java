@@ -9,75 +9,72 @@ import com.bitwig.extension.controller.api.CursorTrack;
 import com.bitwig.extension.controller.api.MidiIn;
 import com.bitwig.extension.controller.api.MidiOut;
 import com.bitwig.extension.controller.api.RemoteControl;
-import com.bitwig.extension.controller.api.SettableEnumValue;
+import com.bitwig.extension.controller.api.Transport;
 
 import static com.electraone.bitwig.ElectraOneMidiConfig.*;
 
 /**
- * Electra One controller extension for Bitwig Studio.
+ * Electra One controller extension for Bitwig Studio (v2).
  *
- * 3 control sets on the E1 touchscreen show 3 consecutive Remote Controls pages.
- * The 12 physical knobs control whichever set is active on the touchscreen.
+ * 3 E1 touchscreen sections show 3 consecutive Remote Controls pages from
+ * the selected device. The 12 physical encoders control whichever section
+ * is active on the touchscreen.
  *
- * Per control set (2x6 grid):
- *   Row A: [A1 Track] [A2 P0] [A3 P1] [A4 P2] [A5 P3] [A6 Device]
- *   Row B: [B1 Page]  [B2 P4] [B3 P5] [B4 P6] [B5 P7] [B6 Bank]
+ * Layout per control set:
+ *   Row A: [A1 Page]   [A2 P0] [A3 P1] [A4 P2] [A5 P3] [A6 Track]
+ *   Row B: [B1 Device] [B2 P4] [B3 P5] [B4 P6] [B5 P7] [B6 Volume]
+ *
+ * Navigation:
+ *   A1 — rotate through device remote-control pages
+ *   A6 — select next/previous track
+ *   B1 — select next/previous device
+ *   B6 — rotate = track volume, touch = play/stop toggle
  */
 public class ElectraOneExtension extends ControllerExtension
 {
    private ControllerHost host;
    private MidiOut midiOut;
    private ElectraOneSysEx sysEx;
+   private Transport transport;
 
    private CursorTrack cursorTrack;
    private CursorDevice cursorDevice;
 
-   // 3 independent page cursors — one per E1 control set
+   // 3 independent page cursors — one per E1 control set / section
    private CursorRemoteControlsPage[] sectionPages;
 
-   // Which E1 control set is active (0-2), set by touchscreen SysEx
+   // Which E1 control set is currently active (0-2)
    private int activeSection = 0;
 
-   // Base page index — section 0 shows basePage, section 1 shows basePage+1, etc.
-   private int basePage = 0;
+   // Page navigation state
+   private int basePage = 0;    // page index shown in section 0
+   private int pageCount = 0;   // total remote-control pages in selected device
+   private String[] cachedPageNames = {};
 
-   // Dirty tracking
+   // Cached navigation labels
+   private String trackName = "";
+   private String deviceName = "";
+
+   // Display change detection (per section × param)
    private boolean needsFullUpdate = true;
-   private final boolean[][] displayDirty = new boolean[NUM_SECTIONS][NUM_PARAMS];
-   private final boolean[] paramValueDirty = new boolean[NUM_PARAMS];
-
-   // Suppress CC echo when hardware originates the change
-   private final boolean[] paramFromHardware = new boolean[NUM_PARAMS];
-
-   // Cached values for change detection
-   private final double[] lastSentValue = new double[NUM_PARAMS];
    private final String[][] lastSentName = new String[NUM_SECTIONS][NUM_PARAMS];
    private final String[][] lastSentDisplayValue = new String[NUM_SECTIONS][NUM_PARAMS];
 
-   // Cached nav state
-   private String cachedTrackName = "";
-   private String cachedDeviceName = "";
-   private String[] cachedPageNames;
+   // CC value feedback change detection — per section, since each set has unique CCs
+   private final int[][] lastSentCC = new int[NUM_SECTIONS][NUM_PARAMS];
 
-   // 14-bit mode
-   private boolean use14Bit = false;
-   private final int[] pendingMSB = new int[NUM_PARAMS];
+   // Nav display change detection
+   private String lastNavTrack = "";
+   private String lastNavDevice = "";
+   private String lastNavVolume = "";
+   private boolean lastNavPlaying = false;
+   private final String[] lastNavPage = { "", "", "" };
 
-   // Page filter
-   private boolean filterE1Pages = false;
-   private int[] filteredPageIndices;
+   // Suppress CC echo when parameter was changed from hardware
+   private final boolean[][] paramFromHardware = new boolean[NUM_SECTIONS][NUM_PARAMS];
 
-   // Suppress SysEx spam logging
-   private int sysExSpamCount = 0;
-
-   // E1 control ID offsets within a 12-control section (0-indexed)
-   private static final int[] PARAM_CONTROL_OFFSET = { 1, 2, 3, 4, 7, 8, 9, 10 };
-
-   // Nav knob offsets within a section (0-indexed)
-   private static final int NAV_TRACK_OFFSET  = 0;   // A1
-   private static final int NAV_DEVICE_OFFSET = 5;   // A6
-   private static final int NAV_PAGE_OFFSET   = 6;   // B1
-   private static final int NAV_BANK_OFFSET   = 11;  // B6
+   // SysEx heartbeat spam filter
+   private int heartbeatCount = 0;
 
    protected ElectraOneExtension(
          ElectraOneExtensionDefinition definition, ControllerHost host)
@@ -85,73 +82,46 @@ public class ElectraOneExtension extends ControllerExtension
       super(definition, host);
    }
 
+   // ── Init ──────────────────────────────────────────────────────────────
+
    @Override
    public void init()
    {
       host = getHost();
-      host.println("=== Electra One extension starting init() ===");
 
       // MIDI ports
-      MidiIn midiIn = host.getMidiInPort(PORT_MIDI);
-      MidiIn ctrlIn = host.getMidiInPort(PORT_CTRL);
-      midiOut = host.getMidiOutPort(PORT_MIDI);
-      MidiOut ctrlOut = host.getMidiOutPort(PORT_CTRL);
+      MidiIn midiIn   = host.getMidiInPort(PORT_MIDI);
+      MidiIn ctrlIn   = host.getMidiInPort(PORT_CTRL);
+      midiOut          = host.getMidiOutPort(PORT_MIDI);
+      MidiOut ctrlOut  = host.getMidiOutPort(PORT_CTRL);
       sysEx = new ElectraOneSysEx(ctrlOut, host);
 
-      // Preference: 7-bit vs 14-bit
-      SettableEnumValue resolutionSetting = host.getPreferences().getEnumSetting(
-         "CC Resolution", "MIDI", new String[]{ "7-bit", "14-bit" }, "7-bit");
-      resolutionSetting.markInterested();
-      resolutionSetting.addValueObserver(val -> {
-         use14Bit = "14-bit".equals(val);
-         host.println("CC resolution: " + val);
-         needsFullUpdate = true;
-         host.requestFlush();
-      });
+      // Transport (for play/stop toggle via B6 touch)
+      transport = host.createTransport();
+      transport.isPlaying().markInterested();
+      transport.isPlaying().addValueObserver(playing -> host.requestFlush());
 
-      // Preference: page filter
-      SettableEnumValue filterSetting = host.getPreferences().getEnumSetting(
-         "Page Filter", "Pages", new String[]{ "All Pages", "E1 Only" }, "All Pages");
-      filterSetting.markInterested();
-      filterSetting.addValueObserver(val -> {
-         filterE1Pages = "E1 Only".equals(val);
-         host.println("Page filter: " + val);
-         recomputeFilteredPages();
-         basePage = 0;
-         updateAllSectionPageIndices();
-         needsFullUpdate = true;
-         host.requestFlush();
-      });
-
-      // Cursor track + device
-      cursorTrack = host.createCursorTrack("E1_CURSOR", "Cursor", 0, 0, true);
-      cursorDevice = cursorTrack.createCursorDevice(
-         "E1_DEVICE", "Device", 0, CursorDeviceFollowMode.FOLLOW_SELECTION);
-
-      // Mark cursor device existence interested so API tracks device changes
-      cursorDevice.exists().markInterested();
-      cursorDevice.exists().addValueObserver(exists -> {
-         host.println(">>> OBSERVER: device.exists = " + exists);
-         needsFullUpdate = true;
-         host.requestFlush();
-      });
-
-      cursorDevice.isEnabled().markInterested();
-      cursorDevice.hasNext().markInterested();
-      cursorDevice.hasPrevious().markInterested();
-
+      // Cursor track
+      cursorTrack = host.createCursorTrack("E1_CURSOR", "E1 Track", 0, 0, true);
       cursorTrack.name().markInterested();
       cursorTrack.name().addValueObserver(name -> {
-         host.println(">>> OBSERVER: track.name = \"" + name + "\"");
-         cachedTrackName = name;
-         needsFullUpdate = true;
+         trackName = name;
          host.requestFlush();
       });
+      cursorTrack.volume().markInterested();
+      cursorTrack.volume().displayedValue().markInterested();
+      cursorTrack.volume().displayedValue().addValueObserver(v -> host.requestFlush());
 
+      // Cursor device (follows Bitwig selection)
+      cursorDevice = cursorTrack.createCursorDevice(
+         "E1_DEVICE", "E1 Device", 0, CursorDeviceFollowMode.FOLLOW_SELECTION);
+      cursorDevice.exists().markInterested();
       cursorDevice.name().markInterested();
+      cursorDevice.hasNext().markInterested();
+      cursorDevice.hasPrevious().markInterested();
       cursorDevice.name().addValueObserver(name -> {
-         host.println(">>> OBSERVER: device.name = \"" + name + "\"");
-         cachedDeviceName = name;
+         deviceName = name;
+         basePage = 0;
          needsFullUpdate = true;
          host.requestFlush();
       });
@@ -161,342 +131,202 @@ public class ElectraOneExtension extends ControllerExtension
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
          sectionPages[s] = cursorDevice.createCursorRemoteControlsPage(
-            "E1_SECTION_" + (s + 1), NUM_PARAMS, "");
+            "E1_SEC_" + s, NUM_PARAMS, "");
          sectionPages[s].selectedPageIndex().markInterested();
          sectionPages[s].pageNames().markInterested();
 
-         final int section = s;
-         sectionPages[s].selectedPageIndex().addValueObserver(index -> {
-            host.println(">>> OBSERVER: section[" + section + "].pageIndex = " + index);
-            needsFullUpdate = true;
-            host.requestFlush();
-         });
-         sectionPages[s].pageNames().addValueObserver(names -> {
-            host.println(">>> OBSERVER: section[" + section + "].pageNames count="
-               + (names != null ? names.length : 0));
-            if (section == 0)
-            {
-               cachedPageNames = names;
-               recomputeFilteredPages();
-            }
-            updateSectionPageIndex(section);
-            needsFullUpdate = true;
-            host.requestFlush();
-         });
+         // Track total page count from section 0's page names
+         if (s == 0)
+         {
+            sectionPages[0].pageNames().addValueObserver(names -> {
+               cachedPageNames = names != null ? names : new String[0];
+               pageCount = cachedPageNames.length;
+               if (basePage >= pageCount && pageCount > 0)
+               {
+                  basePage = 0;
+               }
+               updateAllSectionPageIndices();
+               needsFullUpdate = true;
+               host.requestFlush();
+            });
+         }
 
+         // Parameter observers
          for (int p = 0; p < NUM_PARAMS; p++)
          {
             RemoteControl param = sectionPages[s].getParameter(p);
             param.markInterested();
             param.name().markInterested();
             param.displayedValue().markInterested();
+            param.value().markInterested();
 
-            final int sec = s;
-            final int pi = p;
-            param.value().addValueObserver(v -> {
-               if (sec == activeSection) paramValueDirty[pi] = true;
-            });
-            param.name().addValueObserver(n -> {
-               // Log only for section 0 to reduce spam
-               if (sec == 0)
-               {
-                  host.println(">>> OBSERVER: section[0].param[" + pi
-                     + "].name = \"" + n + "\"");
-               }
-               displayDirty[sec][pi] = true;
-               host.requestFlush();
-            });
-            param.displayedValue().addValueObserver(dv -> {
-               displayDirty[sec][pi] = true;
-               host.requestFlush();
-            });
+            // Trigger flush on any change
+            param.name().addValueObserver(n -> host.requestFlush());
+            param.displayedValue().addValueObserver(v -> host.requestFlush());
+            param.value().addValueObserver(v -> host.requestFlush());
          }
       }
 
-      // Set initial page indices
       updateAllSectionPageIndices();
 
-      // Raw MIDI callback for all CC input
-      midiIn.setMidiCallback((int status, int data1, int data2) -> {
-         if ((status & 0xF0) != 0xB0) return;
-         if ((status & 0x0F) != CHANNEL) return;
+      // Raw MIDI callback for CC input on port 0
+      midiIn.setMidiCallback(this::onMidi);
 
-         // Navigation knobs — relative 2's complement
-         if (data1 == CC_TRACK)
-         {
-            if (data2 < 64) cursorTrack.selectNext();
-            else cursorTrack.selectPrevious();
-            return;
-         }
-         if (data1 == CC_DEVICE)
-         {
-            if (data2 < 64) cursorDevice.selectNext();
-            else cursorDevice.selectPrevious();
-            return;
-         }
-         if (data1 == CC_PAGE)
-         {
-            navigateBasePage(data2 < 64 ? 1 : -1);
-            return;
-         }
-         if (data1 == CC_BANK)
-         {
-            navigateBasePage(data2 < 64 ? NUM_SECTIONS : -NUM_SECTIONS);
-            return;
-         }
+      // SysEx callback on CTRL port for section switches and pot touch
+      ctrlIn.setSysexCallback(this::onSysEx);
 
-         // Parameter knobs — direct CC-to-param mapping
-         for (int i = 0; i < NUM_PARAMS; i++)
-         {
-            if (data1 == PARAM_CC_MSB[i])
-            {
-               paramFromHardware[i] = true;
-               if (use14Bit)
-               {
-                  pendingMSB[i] = data2;
-                  return;
-               }
-               double normalized = data2 / 127.0;
-               sectionPages[activeSection].getParameter(i).set(normalized);
-               return;
-            }
-            if (use14Bit && data1 == PARAM_CC_LSB[i])
-            {
-               int combined = (pendingMSB[i] << 7) | data2;
-               double normalized = combined / 16383.0;
-               sectionPages[activeSection].getParameter(i).set(normalized);
-               return;
-            }
-         }
-      });
+      // Subscribe to E1 events (section switches, pot touch)
+      sysEx.subscribeToEvents();
 
-      // SysEx callback on CTRL port
-      ctrlIn.setSysexCallback((String data) -> {
-         // Filter out E1 heartbeat/status spam
-         if (data.contains("7e000000") || data.contains("7E000000"))
-         {
-            sysExSpamCount++;
-            if (sysExSpamCount == 1 || sysExSpamCount % 100 == 0)
-            {
-               host.println("SysEx heartbeat (count=" + sysExSpamCount + "): " + data);
-            }
-            return;
-         }
-         host.println("SysEx received: " + data);
-         int section = ElectraOneSysEx.parseSectionSwitch(data);
-         if (section >= 0 && section < NUM_SECTIONS && section != activeSection)
-         {
-            host.println("Section switch: " + (section + 1));
-            activeSection = section;
-            for (int i = 0; i < NUM_PARAMS; i++)
-            {
-               paramValueDirty[i] = true;
-               lastSentValue[i] = -1;
-            }
-            needsFullUpdate = true;
-            host.requestFlush();
-         }
-      });
-
-      // Initialize caches
+      // Initialize change-detection caches
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
          for (int i = 0; i < NUM_PARAMS; i++)
          {
-            lastSentName[s][i] = "";
-            lastSentDisplayValue[s][i] = "";
-            displayDirty[s][i] = true;
+            lastSentName[s][i] = "\0";
+            lastSentDisplayValue[s][i] = "\0";
+            lastSentCC[s][i] = -1;
          }
       }
-      for (int i = 0; i < NUM_PARAMS; i++)
-      {
-         lastSentValue[i] = -1;
-         paramValueDirty[i] = true;
-      }
 
-      // Test SysEx immediately — verify E1 display updates
-      host.println("=== Sending SysEx test to control 1 and 2 ===");
-      sysEx.sendControlName(1, "TEST");
-      sysEx.sendValueLabel(1, "Hello");
-      sysEx.sendControlUpdate(2, "MyParam", "42%");
-
-      // Delayed initial update
+      // Delayed full update (give Bitwig time to populate observers)
       host.scheduleTask(() -> {
-         host.println("=== Delayed update: device exists="
-            + cursorDevice.exists().get()
-            + " device=\"" + cursorDevice.name().get() + "\""
-            + " track=\"" + cursorTrack.name().get() + "\"");
          needsFullUpdate = true;
          host.requestFlush();
-      }, 3000);
+      }, 2000);
 
-      host.println("Electra One initialized — " + NUM_SECTIONS
-         + " sections, " + NUM_PARAMS + " params each");
+      host.println("Electra One v2.0 initialized");
    }
 
-   // ── Page navigation ─────────────────────────────────────────────────
+   // ── Page navigation ───────────────────────────────────────────────────
 
-   private void navigateBasePage(int delta)
+   private void navigatePage(int delta)
    {
-      int totalPages = getNavigablePageCount();
-      if (totalPages <= 0) return;
-
-      int newBase = basePage + delta;
-      if (newBase < 0) newBase = 0;
-      if (newBase >= totalPages) newBase = totalPages - 1;
-
-      if (newBase != basePage)
-      {
-         basePage = newBase;
-         updateAllSectionPageIndices();
-         needsFullUpdate = true;
-         host.requestFlush();
-      }
-   }
-
-   private int getNavigablePageCount()
-   {
-      if (filteredPageIndices != null) return filteredPageIndices.length;
-      if (cachedPageNames != null) return cachedPageNames.length;
-      return 0;
-   }
-
-   private int resolvePageIndex(int section)
-   {
-      int logicalIndex = basePage + section;
-      if (filteredPageIndices != null)
-      {
-         if (logicalIndex >= 0 && logicalIndex < filteredPageIndices.length)
-            return filteredPageIndices[logicalIndex];
-         return -1;
-      }
-      if (cachedPageNames != null && logicalIndex >= 0
-            && logicalIndex < cachedPageNames.length)
-         return logicalIndex;
-      return -1;
-   }
-
-   private void updateSectionPageIndex(int section)
-   {
-      int actualIndex = resolvePageIndex(section);
-      if (actualIndex >= 0)
-      {
-         sectionPages[section].selectedPageIndex().set(actualIndex);
-      }
+      if (pageCount <= 0) return;
+      basePage = ((basePage + delta) % pageCount + pageCount) % pageCount;
+      updateAllSectionPageIndices();
+      needsFullUpdate = true;
+      host.requestFlush();
    }
 
    private void updateAllSectionPageIndices()
    {
+      if (pageCount <= 0) return;
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
-         updateSectionPageIndex(s);
+         int pageIdx = (basePage + s) % pageCount;
+         sectionPages[s].selectedPageIndex().set(pageIdx);
       }
    }
 
-   private void recomputeFilteredPages()
+   // ── MIDI input (port 0) ──────────────────────────────────────────────
+
+   private void onMidi(int status, int data1, int data2)
    {
-      if (!filterE1Pages)
+      if ((status & 0xF0) != 0xB0) return;          // CC only
+      if ((status & 0x0F) != CHANNEL) return;        // our channel only
+
+      // Navigation knobs — relative 2's complement
+      switch (data1)
       {
-         filteredPageIndices = null;
-         return;
+         case CC_PAGE:
+            navigatePage(data2 < 64 ? 1 : -1);
+            return;
+
+         case CC_TRACK:
+            if (data2 < 64) cursorTrack.selectNext();
+            else cursorTrack.selectPrevious();
+            return;
+
+         case CC_DEVICE:
+            if (data2 < 64) cursorDevice.selectNext();
+            else cursorDevice.selectPrevious();
+            return;
+
+         case CC_VOLUME:
+            // Relative volume adjustment
+            int increment = data2 < 64 ? data2 : data2 - 128;
+            cursorTrack.volume().inc(increment, 128);
+            return;
       }
-      if (cachedPageNames == null)
+
+      // Parameter knobs — check all 3 sections' CCs
+      for (int s = 0; s < NUM_SECTIONS; s++)
       {
-         filteredPageIndices = new int[0];
-         return;
-      }
-      int count = 0;
-      for (String name : cachedPageNames)
-      {
-         if (name != null && name.contains("E1")) count++;
-      }
-      filteredPageIndices = new int[count];
-      int idx = 0;
-      for (int i = 0; i < cachedPageNames.length; i++)
-      {
-         if (cachedPageNames[i] != null && cachedPageNames[i].contains("E1"))
+         for (int i = 0; i < NUM_PARAMS; i++)
          {
-            filteredPageIndices[idx++] = i;
+            if (data1 == SECTION_PARAM_CC[s][i])
+            {
+               paramFromHardware[s][i] = true;
+               double normalized = data2 / 127.0;
+               sectionPages[s].getParameter(i).set(normalized);
+               return;
+            }
          }
       }
    }
 
-   // ── Flush cycle ─────────────────────────────────────────────────────
+   // ── SysEx input (CTRL port) ──────────────────────────────────────────
+
+   private void onSysEx(String data)
+   {
+      // Filter heartbeat spam
+      if (data.contains("7e000000") || data.contains("7E000000"))
+      {
+         heartbeatCount++;
+         return;
+      }
+
+      // Section switch (touchscreen control set change)
+      int section = ElectraOneSysEx.parseSectionSwitch(data);
+      if (section >= 0 && section < NUM_SECTIONS)
+      {
+         if (section != activeSection)
+         {
+            activeSection = section;
+            host.requestFlush();
+         }
+         return;
+      }
+
+      // Pot touch — B6 touch = play/stop toggle
+      int touchPotId = ElectraOneSysEx.parsePotTouch(data);
+      if (touchPotId == POT_B6)
+      {
+         transport.togglePlay();
+         return;
+      }
+   }
+
+   // ── Flush (display + CC feedback) ────────────────────────────────────
 
    @Override
    public void flush()
    {
-      // Stage 1: Full display refresh
-      if (needsFullUpdate)
+      boolean batch = needsFullUpdate;
+      if (batch)
       {
          needsFullUpdate = false;
-         sendFullDisplayUpdate();
-         for (int i = 0; i < NUM_PARAMS; i++)
-         {
-            paramValueDirty[i] = true;
-         }
-      }
+         sysEx.setRepaintEnabled(false);
 
-      // Stage 2: Incremental display updates for ALL sections
-      for (int s = 0; s < NUM_SECTIONS; s++)
-      {
-         for (int i = 0; i < NUM_PARAMS; i++)
+         // Reset change caches to force full resend
+         for (int s = 0; s < NUM_SECTIONS; s++)
          {
-            if (displayDirty[s][i])
+            for (int i = 0; i < NUM_PARAMS; i++)
             {
-               displayDirty[s][i] = false;
-               RemoteControl param = sectionPages[s].getParameter(i);
-               String name = param.name().get();
-               String displayValue = param.displayedValue().get();
-
-               if (!name.equals(lastSentName[s][i])
-                     || !displayValue.equals(lastSentDisplayValue[s][i]))
-               {
-                  lastSentName[s][i] = name;
-                  lastSentDisplayValue[s][i] = displayValue;
-                  int controlId = getParamControlId(s, i);
-                  host.println("  incremental S" + s + " P" + i
-                     + " id=" + controlId + " name=\"" + name
-                     + "\" val=\"" + displayValue + "\"");
-                  sysEx.sendControlUpdate(controlId, name, displayValue);
-               }
+               lastSentName[s][i] = "\0";
+               lastSentDisplayValue[s][i] = "\0";
+               lastSentCC[s][i] = -1;
             }
          }
+         lastNavTrack = "\0";
+         lastNavDevice = "\0";
+         lastNavVolume = "\0";
+         lastNavPlaying = !transport.isPlaying().get(); // force mismatch
+         for (int i = 0; i < 3; i++) lastNavPage[i] = "\0";
       }
 
-      // Stage 3: CC value feedback for active section
-      for (int i = 0; i < NUM_PARAMS; i++)
-      {
-         if (paramFromHardware[i])
-         {
-            paramFromHardware[i] = false;
-            paramValueDirty[i] = false;
-            lastSentValue[i] = sectionPages[activeSection].getParameter(i).get();
-            continue;
-         }
-         if (paramValueDirty[i])
-         {
-            paramValueDirty[i] = false;
-            double value = sectionPages[activeSection].getParameter(i).get();
-
-            if (value != lastSentValue[i])
-            {
-               lastSentValue[i] = value;
-               sendParamCC(i, value);
-            }
-         }
-      }
-   }
-
-   private void sendFullDisplayUpdate()
-   {
-      host.println("sendFullDisplayUpdate: track=\"" + cachedTrackName
-         + "\" device=\"" + cachedDeviceName + "\" basePage=" + basePage
-         + " deviceExists=" + cursorDevice.exists().get());
-
-      // Disable repaint during batch update for performance
-      sysEx.setRepaintEnabled(false);
-
+      // Parameter display updates (all 3 sections)
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
          for (int i = 0; i < NUM_PARAMS; i++)
@@ -504,43 +334,109 @@ public class ElectraOneExtension extends ControllerExtension
             RemoteControl param = sectionPages[s].getParameter(i);
             String name = param.name().get();
             String displayValue = param.displayedValue().get();
-            int controlId = getParamControlId(s, i);
-            if (s == 0)
+
+            if (!name.equals(lastSentName[s][i])
+                  || !displayValue.equals(lastSentDisplayValue[s][i]))
             {
-               host.println("  S0 P" + i + " id=" + controlId
-                  + " name=\"" + name + "\" val=\"" + displayValue + "\"");
+               lastSentName[s][i] = name;
+               lastSentDisplayValue[s][i] = displayValue;
+               int ctrlId = getParamControlId(s, i);
+               sysEx.sendControlNameColor(ctrlId, name, SECTION_COLORS[s]);
+               sysEx.sendValueLabel(ctrlId, displayValue);
             }
-            sysEx.sendControlUpdate(controlId, name, displayValue);
-            lastSentName[s][i] = name;
-            lastSentDisplayValue[s][i] = displayValue;
          }
-
-         int trackId = getNavControlId(s, NAV_TRACK_OFFSET);
-         int deviceId = getNavControlId(s, NAV_DEVICE_OFFSET);
-         int pageId = getNavControlId(s, NAV_PAGE_OFFSET);
-         int bankId = getNavControlId(s, NAV_BANK_OFFSET);
-
-         sysEx.sendControlUpdate(trackId, "Track", cachedTrackName);
-         sysEx.sendControlUpdate(deviceId, "Device", cachedDeviceName);
-         sysEx.sendControlUpdate(pageId, "Page", getPageName(s));
-
-         int pageCount = getNavigablePageCount();
-         int pageNum = basePage + s + 1;
-         String bankLabel = pageCount > 0
-            ? pageNum + "/" + pageCount
-            : "---";
-         sysEx.sendControlUpdate(bankId, "Bank", bankLabel);
       }
 
-      // Re-enable repaint to trigger a single screen refresh
-      sysEx.setRepaintEnabled(true);
+      // Navigation display updates
+      updateNavDisplay();
+
+      // CC value feedback — send for ALL 3 sections (each has unique CCs)
+      for (int s = 0; s < NUM_SECTIONS; s++)
+      {
+         for (int i = 0; i < NUM_PARAMS; i++)
+         {
+            if (paramFromHardware[s][i])
+            {
+               // Suppress echo: just update cache, don't send CC back
+               paramFromHardware[s][i] = false;
+               double val = sectionPages[s].getParameter(i).get();
+               lastSentCC[s][i] = (int) Math.round(val * 127.0);
+               continue;
+            }
+
+            double val = sectionPages[s].getParameter(i).get();
+            int cc7 = (int) Math.round(val * 127.0);
+            if (cc7 != lastSentCC[s][i])
+            {
+               lastSentCC[s][i] = cc7;
+               midiOut.sendMidi(0xB0 | CHANNEL, SECTION_PARAM_CC[s][i], cc7);
+            }
+         }
+      }
+
+      if (batch)
+      {
+         sysEx.setRepaintEnabled(true);
+      }
    }
 
-   // ── Control ID mapping ──────────────────────────────────────────────
+   private void updateNavDisplay()
+   {
+      String volValue = cursorTrack.volume().displayedValue().get();
+      boolean playing = transport.isPlaying().get();
+      String page0 = getPageName(0);
+      String page1 = getPageName(1);
+      String page2 = getPageName(2);
+
+      boolean changed = !trackName.equals(lastNavTrack)
+         || !deviceName.equals(lastNavDevice)
+         || !volValue.equals(lastNavVolume)
+         || playing != lastNavPlaying
+         || !page0.equals(lastNavPage[0])
+         || !page1.equals(lastNavPage[1])
+         || !page2.equals(lastNavPage[2]);
+
+      if (!changed) return;
+
+      lastNavTrack = trackName;
+      lastNavDevice = deviceName;
+      lastNavVolume = volValue;
+      lastNavPlaying = playing;
+      lastNavPage[0] = page0;
+      lastNavPage[1] = page1;
+      lastNavPage[2] = page2;
+
+      String volColor = playing ? PLAY_COLOR : NAV_COLOR;
+
+      for (int s = 0; s < NUM_SECTIONS; s++)
+      {
+         sysEx.sendControlNameColor(
+            getNavControlId(s, NAV_PAGE_OFFSET), "Page", NAV_COLOR);
+         sysEx.sendValueLabel(
+            getNavControlId(s, NAV_PAGE_OFFSET), getPageName(s));
+
+         sysEx.sendControlNameColor(
+            getNavControlId(s, NAV_TRACK_OFFSET), "Track", NAV_COLOR);
+         sysEx.sendValueLabel(
+            getNavControlId(s, NAV_TRACK_OFFSET), trackName);
+
+         sysEx.sendControlNameColor(
+            getNavControlId(s, NAV_DEVICE_OFFSET), "Device", NAV_COLOR);
+         sysEx.sendValueLabel(
+            getNavControlId(s, NAV_DEVICE_OFFSET), deviceName);
+
+         sysEx.sendControlNameColor(
+            getNavControlId(s, NAV_VOLUME_OFFSET), "Volume", volColor);
+         sysEx.sendValueLabel(
+            getNavControlId(s, NAV_VOLUME_OFFSET), volValue);
+      }
+   }
+
+   // ── Control ID helpers ────────────────────────────────────────────────
 
    private int getParamControlId(int section, int paramIndex)
    {
-      return (section * CONTROLS_PER_SECTION) + PARAM_CONTROL_OFFSET[paramIndex] + 1;
+      return (section * CONTROLS_PER_SECTION) + PARAM_OFFSET[paramIndex] + 1;
    }
 
    private int getNavControlId(int section, int offset)
@@ -550,48 +446,39 @@ public class ElectraOneExtension extends ControllerExtension
 
    private String getPageName(int section)
    {
-      int actualIndex = resolvePageIndex(section);
-      if (actualIndex >= 0 && cachedPageNames != null
-            && actualIndex < cachedPageNames.length)
+      if (pageCount <= 0) return "---";
+      int pageIdx = (basePage + section) % pageCount;
+      if (pageIdx < cachedPageNames.length)
       {
-         return cachedPageNames[actualIndex];
+         return cachedPageNames[pageIdx];
       }
       return "---";
    }
 
-   // ── CC output ───────────────────────────────────────────────────────
-
-   private void sendParamCC(int paramIndex, double value)
-   {
-      if (use14Bit)
-      {
-         int val14 = (int) Math.round(value * 16383.0);
-         int msb = (val14 >> 7) & 0x7F;
-         int lsb = val14 & 0x7F;
-         midiOut.sendMidi(0xB0 | CHANNEL, PARAM_CC_MSB[paramIndex], msb);
-         midiOut.sendMidi(0xB0 | CHANNEL, PARAM_CC_LSB[paramIndex], lsb);
-      }
-      else
-      {
-         int val7 = (int) Math.round(value * 127.0);
-         midiOut.sendMidi(0xB0 | CHANNEL, PARAM_CC_MSB[paramIndex], val7);
-      }
-   }
+   // ── Exit ──────────────────────────────────────────────────────────────
 
    @Override
    public void exit()
    {
+      sysEx.setRepaintEnabled(false);
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
          for (int i = 0; i < NUM_PARAMS; i++)
          {
-            sysEx.sendControlUpdate(getParamControlId(s, i), "", "");
+            int ctrlId = getParamControlId(s, i);
+            sysEx.sendControlNameColor(ctrlId, "", NAV_COLOR);
+            sysEx.sendValueLabel(ctrlId, "");
          }
-         sysEx.sendControlUpdate(getNavControlId(s, NAV_TRACK_OFFSET), "", "");
-         sysEx.sendControlUpdate(getNavControlId(s, NAV_DEVICE_OFFSET), "", "");
-         sysEx.sendControlUpdate(getNavControlId(s, NAV_PAGE_OFFSET), "", "");
-         sysEx.sendControlUpdate(getNavControlId(s, NAV_BANK_OFFSET), "", "");
+         sysEx.sendControlNameColor(getNavControlId(s, NAV_PAGE_OFFSET), "", NAV_COLOR);
+         sysEx.sendValueLabel(getNavControlId(s, NAV_PAGE_OFFSET), "");
+         sysEx.sendControlNameColor(getNavControlId(s, NAV_TRACK_OFFSET), "", NAV_COLOR);
+         sysEx.sendValueLabel(getNavControlId(s, NAV_TRACK_OFFSET), "");
+         sysEx.sendControlNameColor(getNavControlId(s, NAV_DEVICE_OFFSET), "", NAV_COLOR);
+         sysEx.sendValueLabel(getNavControlId(s, NAV_DEVICE_OFFSET), "");
+         sysEx.sendControlNameColor(getNavControlId(s, NAV_VOLUME_OFFSET), "", NAV_COLOR);
+         sysEx.sendValueLabel(getNavControlId(s, NAV_VOLUME_OFFSET), "");
       }
+      sysEx.setRepaintEnabled(true);
       host.println("Electra One exited");
    }
 }
