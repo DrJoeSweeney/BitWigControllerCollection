@@ -131,13 +131,19 @@ public class ElectraOneSysEx
 
    /**
     * Upload a complete JSON preset to the E1 and activate it.
-    * Format: F0 00 21 45 04 08 [minified-json] F7
+    * Tries both SysEx commands for firmware compatibility:
+    *   0x04 0x08 = Update preset slot (firmware 3.5+)
+    *   0x01 0x01 = Upload preset (older firmware)
     */
    public void uploadPreset(String json)
    {
-      String hex = HDR + "0408" + asciiToHex(json) + "f7";
-      ctrlOut.sendSysex(hex);
-      host.println("E1 preset uploaded (" + json.length() + " bytes)");
+      String payload = asciiToHex(json);
+      // Try update preset slot first (newer firmware)
+      ctrlOut.sendSysex(HDR + "0408" + payload + "f7");
+      host.println("E1 preset uploaded via 04 08 (" + json.length() + " bytes)");
+      // Also try legacy upload command for compatibility
+      ctrlOut.sendSysex(HDR + "0101" + payload + "f7");
+      host.println("E1 preset uploaded via 01 01 (" + json.length() + " bytes)");
    }
 
    /**

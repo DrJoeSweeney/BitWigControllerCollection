@@ -81,9 +81,7 @@ public class ElectraOneExtension extends ControllerExtension
    private static final long ECHO_SUPPRESS_MS = 250;
    private final long[][] lastHardwareTime = new long[NUM_SECTIONS][NUM_PARAMS];
 
-   // Volume encoder accumulator (only volume still uses encoder)
-   private int thresholdVolume = 10;
-   private int accumVolume = 0;
+   // Volume is now absolute CC — no accumulator needed
 
    // Track which lists need updating
    private boolean pageListDirty = true;
@@ -117,11 +115,6 @@ public class ElectraOneExtension extends ControllerExtension
       midiOut          = host.getMidiOutPort(PORT_MIDI);
       MidiOut ctrlOut  = host.getMidiOutPort(PORT_CTRL);
       sysEx = new ElectraOneSysEx(ctrlOut, host);
-
-      // Volume encoder sensitivity preference
-      host.getPreferences().getNumberSetting(
-         "Volume Encoder Sensitivity", "Encoder Speed", 1, 20, 1, "", 10)
-         .addValueObserver(20, val -> thresholdVolume = Math.max(1, val));
 
       // Transport
       transport = host.createTransport();
@@ -305,43 +298,41 @@ public class ElectraOneExtension extends ControllerExtension
       switch (data1)
       {
          case CC_PAGE:
-            // List control: data2 = page index (absolute value)
-            selectPage(data2);
-            return;
-
-         case CC_TRACK:
-            // List control: data2 = track index
-            if (data2 >= 0 && data2 < NUM_TRACKS)
-            {
-               trackBank.getItemAt(data2).selectInMixer();
-            }
-            return;
-
-         case CC_DEVICE:
-            // List control: data2 = device index
-            if (data2 >= 0 && data2 < NUM_DEVICES)
-            {
-               deviceBank.getDevice(data2).selectInEditor();
-            }
-            return;
-
-         case CC_VOLUME:
          {
-            // Volume still uses relative encoder
-            int relDelta = data2 < 64 ? data2 : data2 - 128;
-            accumVolume += relDelta;
-            if (accumVolume >= thresholdVolume)
-            {
-               cursorTrack.volume().inc(1, 128);
-               accumVolume = 0;
-            }
-            else if (accumVolume <= -thresholdVolume)
-            {
-               cursorTrack.volume().inc(-1, 128);
-               accumVolume = 0;
-            }
+            // Absolute CC 0-127 → scale to page index
+            if (pageCount <= 0) return;
+            int pageIdx = (data2 * pageCount) / 128;
+            if (pageIdx >= pageCount) pageIdx = pageCount - 1;
+            selectPage(pageIdx);
             return;
          }
+
+         case CC_TRACK:
+         {
+            // Absolute CC 0-127 → scale to track index (0..15)
+            int trackCount = countExistingTracks();
+            if (trackCount <= 0) return;
+            int trackIdx = (data2 * trackCount) / 128;
+            if (trackIdx >= trackCount) trackIdx = trackCount - 1;
+            trackBank.getItemAt(trackIdx).selectInMixer();
+            return;
+         }
+
+         case CC_DEVICE:
+         {
+            // Absolute CC 0-127 → scale to device index
+            int devCount = countExistingDevices();
+            if (devCount <= 0) return;
+            int devIdx = (data2 * devCount) / 128;
+            if (devIdx >= devCount) devIdx = devCount - 1;
+            deviceBank.getDevice(devIdx).selectInEditor();
+            return;
+         }
+
+         case CC_VOLUME:
+            // Absolute CC 0-127 → direct volume mapping
+            cursorTrack.volume().set(data2 / 127.0);
+            return;
       }
 
       // Parameter knobs — absolute CC
@@ -649,6 +640,28 @@ public class ElectraOneExtension extends ControllerExtension
          + ",\"values\":[{\"id\":\"value\""
          + ",\"message\":{\"deviceId\":1,\"type\":\"cc7\""
          + ",\"parameterNumber\":" + cc + ",\"min\":0,\"max\":127}}]}";
+   }
+
+   // ── Count helpers ────────────────────────────────────────────────────
+
+   private int countExistingTracks()
+   {
+      int count = 0;
+      for (int i = 0; i < NUM_TRACKS; i++)
+      {
+         if (trackBank.getItemAt(i).exists().get()) count = i + 1;
+      }
+      return count;
+   }
+
+   private int countExistingDevices()
+   {
+      int count = 0;
+      for (int i = 0; i < NUM_DEVICES; i++)
+      {
+         if (deviceBank.getDevice(i).exists().get()) count = i + 1;
+      }
+      return count;
    }
 
    // ── Control ID helpers ────────────────────────────────────────────────
