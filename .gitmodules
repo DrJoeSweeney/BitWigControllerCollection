@@ -1,0 +1,3 @@
+[submodule "note-fx-scale-clap/clap"]
+	path = note-fx-scale-clap/clap
+	url = https://github.com/free-audio/clap.git
