@@ -127,69 +127,6 @@ public class ElectraOneSysEx
       return -1;
    }
 
-   // ── Preset & Lua ────────────────────────────────────────────────────
-
-   /**
-    * Upload a complete JSON preset to the E1 and activate it.
-    * Tries both SysEx commands for firmware compatibility:
-    *   0x04 0x08 = Update preset slot (firmware 3.5+)
-    *   0x01 0x01 = Upload preset (older firmware)
-    */
-   public void uploadPreset(String json)
-   {
-      String payload = asciiToHex(json);
-      // Try update preset slot first (newer firmware)
-      ctrlOut.sendSysex(HDR + "0408" + payload + "f7");
-      host.println("E1 preset uploaded via 04 08 (" + json.length() + " bytes)");
-      // Also try legacy upload command for compatibility
-      ctrlOut.sendSysex(HDR + "0101" + payload + "f7");
-      host.println("E1 preset uploaded via 01 01 (" + json.length() + " bytes)");
-   }
-
-   /**
-    * Execute a Lua command on the E1.
-    * Format: F0 00 21 45 08 0D [lua-code] F7
-    */
-   public void executeLua(String lua)
-   {
-      String hex = HDR + "080d" + asciiToHex(lua) + "f7";
-      ctrlOut.sendSysex(hex);
-   }
-
-   /**
-    * Update an overlay (list items) on the E1 via Lua.
-    * Builds: overlays.create(id,{{value=0,label="..."},{value=1,label="..."},...})
-    */
-   public void updateOverlay(int overlayId, String[] names)
-   {
-      StringBuilder lua = new StringBuilder();
-      lua.append("overlays.create(").append(overlayId).append(",{");
-      for (int i = 0; i < names.length; i++)
-      {
-         if (i > 0) lua.append(",");
-         lua.append("{value=").append(i).append(",label=\"");
-         lua.append(escapeLua(names[i]));
-         lua.append("\"}");
-      }
-      lua.append("})");
-      executeLua(lua.toString());
-   }
-
-   /**
-    * Set the current value of a list control on the E1 via Lua.
-    * Sends: parameterMap.set(1,PT_CC7,cc,value)
-    */
-   public void setListValue(int cc, int value)
-   {
-      executeLua("parameterMap.set(1,PT_CC7," + cc + "," + value + ")");
-   }
-
-   private static String escapeLua(String s)
-   {
-      if (s == null) return "";
-      return s.replace("\\", "\\\\").replace("\"", "\\\"");
-   }
-
    // ── Helpers ───────────────────────────────────────────────────────────
 
    /**
