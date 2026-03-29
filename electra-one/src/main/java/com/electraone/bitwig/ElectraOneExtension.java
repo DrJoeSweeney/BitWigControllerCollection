@@ -285,14 +285,19 @@ public class ElectraOneExtension extends ControllerExtension
       switch (data1)
       {
          case CC_PAGE:
+            if (now - lastNavPageTime < NAV_RATE_LIMIT_MS)
+            {
+               accumPage = 0;  // discard ticks during cooldown
+               return;
+            }
             accumPage += relDelta;
-            if (accumPage >= thresholdPage && now - lastNavPageTime >= NAV_RATE_LIMIT_MS)
+            if (accumPage >= thresholdPage)
             {
                navigatePage(1);
                accumPage = 0;
                lastNavPageTime = now;
             }
-            else if (accumPage <= -thresholdPage && now - lastNavPageTime >= NAV_RATE_LIMIT_MS)
+            else if (accumPage <= -thresholdPage)
             {
                navigatePage(-1);
                accumPage = 0;
@@ -301,14 +306,19 @@ public class ElectraOneExtension extends ControllerExtension
             return;
 
          case CC_TRACK:
+            if (now - lastNavTrackTime < NAV_RATE_LIMIT_MS)
+            {
+               accumTrack = 0;
+               return;
+            }
             accumTrack += relDelta;
-            if (accumTrack >= thresholdTrack && now - lastNavTrackTime >= NAV_RATE_LIMIT_MS)
+            if (accumTrack >= thresholdTrack)
             {
                cursorTrack.selectNext();
                accumTrack = 0;
                lastNavTrackTime = now;
             }
-            else if (accumTrack <= -thresholdTrack && now - lastNavTrackTime >= NAV_RATE_LIMIT_MS)
+            else if (accumTrack <= -thresholdTrack)
             {
                cursorTrack.selectPrevious();
                accumTrack = 0;
@@ -317,14 +327,19 @@ public class ElectraOneExtension extends ControllerExtension
             return;
 
          case CC_DEVICE:
+            if (now - lastNavDeviceTime < NAV_RATE_LIMIT_MS)
+            {
+               accumDevice = 0;
+               return;
+            }
             accumDevice += relDelta;
-            if (accumDevice >= thresholdDevice && now - lastNavDeviceTime >= NAV_RATE_LIMIT_MS)
+            if (accumDevice >= thresholdDevice)
             {
                cursorDevice.selectNext();
                accumDevice = 0;
                lastNavDeviceTime = now;
             }
-            else if (accumDevice <= -thresholdDevice && now - lastNavDeviceTime >= NAV_RATE_LIMIT_MS)
+            else if (accumDevice <= -thresholdDevice)
             {
                cursorDevice.selectPrevious();
                accumDevice = 0;
