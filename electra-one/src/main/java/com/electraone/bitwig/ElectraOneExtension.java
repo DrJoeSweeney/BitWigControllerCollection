@@ -6,9 +6,13 @@ import com.bitwig.extension.controller.api.CursorDevice;
 import com.bitwig.extension.controller.api.CursorDeviceFollowMode;
 import com.bitwig.extension.controller.api.CursorRemoteControlsPage;
 import com.bitwig.extension.controller.api.CursorTrack;
+import com.bitwig.extension.controller.api.Device;
+import com.bitwig.extension.controller.api.DeviceBank;
 import com.bitwig.extension.controller.api.MidiIn;
 import com.bitwig.extension.controller.api.MidiOut;
 import com.bitwig.extension.controller.api.RemoteControl;
+import com.bitwig.extension.controller.api.Track;
+import com.bitwig.extension.controller.api.TrackBank;
 import com.bitwig.extension.controller.api.Transport;
 
 import static com.electraone.bitwig.ElectraOneMidiConfig.*;
@@ -39,6 +43,9 @@ public class ElectraOneExtension extends ControllerExtension
 
    private CursorTrack cursorTrack;
    private CursorDevice cursorDevice;
+   private TrackBank trackBank;
+   private DeviceBank deviceBank;
+   private static final int MAX_NAV_ITEMS = 16;
 
    // 3 independent page cursors — one per E1 control set / section
    private CursorRemoteControlsPage[] sectionPages;
@@ -76,14 +83,8 @@ public class ElectraOneExtension extends ControllerExtension
    private static final long ECHO_SUPPRESS_MS = 250;
    private final long[][] lastHardwareTime = new long[NUM_SECTIONS][NUM_PARAMS];
 
-   // Navigation encoder accumulators — accumulate relative ticks, fire at threshold.
-   private int thresholdPage   = 10;
-   private int thresholdTrack  = 10;
-   private int thresholdDevice = 10;
+   // Volume encoder accumulator
    private int thresholdVolume = 10;
-   private int accumPage   = 0;
-   private int accumTrack  = 0;
-   private int accumDevice = 0;
    private int accumVolume = 0;
 
    // SysEx heartbeat spam filter
@@ -109,19 +110,7 @@ public class ElectraOneExtension extends ControllerExtension
       MidiOut ctrlOut  = host.getMidiOutPort(PORT_CTRL);
       sysEx = new ElectraOneSysEx(ctrlOut, host);
 
-      // Encoder sensitivity preferences (1 = most sensitive, 20 = slowest)
-      host.getPreferences().getNumberSetting(
-         "Page Encoder Sensitivity", "Encoder Speed", 1, 20, 1, "", 10)
-         .addValueObserver(20, val -> thresholdPage = Math.max(1, val));
-
-      host.getPreferences().getNumberSetting(
-         "Track Encoder Sensitivity", "Encoder Speed", 1, 20, 1, "", 10)
-         .addValueObserver(20, val -> thresholdTrack = Math.max(1, val));
-
-      host.getPreferences().getNumberSetting(
-         "Device Encoder Sensitivity", "Encoder Speed", 1, 20, 1, "", 10)
-         .addValueObserver(20, val -> thresholdDevice = Math.max(1, val));
-
+      // Volume encoder sensitivity preference
       host.getPreferences().getNumberSetting(
          "Volume Encoder Sensitivity", "Encoder Speed", 1, 20, 1, "", 10)
          .addValueObserver(20, val -> thresholdVolume = Math.max(1, val));
@@ -155,6 +144,21 @@ public class ElectraOneExtension extends ControllerExtension
          needsFullUpdate = true;
          host.requestFlush();
       });
+
+      // Track bank (16 tracks) for absolute track selection
+      trackBank = host.createTrackBank(MAX_NAV_ITEMS, 0, 0);
+      for (int i = 0; i < MAX_NAV_ITEMS; i++)
+      {
+         Track track = trackBank.getItemAt(i);
+         track.exists().markInterested();
+      }
+
+      // Device bank (16 devices) for absolute device selection
+      deviceBank = cursorTrack.createDeviceBank(MAX_NAV_ITEMS);
+      for (int i = 0; i < MAX_NAV_ITEMS; i++)
+      {
+         deviceBank.getDevice(i).exists().markInterested();
+      }
 
       // 3 section pages — independent cursors on the same device
       sectionPages = new CursorRemoteControlsPage[NUM_SECTIONS];
@@ -243,10 +247,10 @@ public class ElectraOneExtension extends ControllerExtension
 
    // ── Page navigation ───────────────────────────────────────────────────
 
-   private void navigatePage(int delta)
+   private void selectPage(int pageIndex)
    {
-      if (pageCount <= 0) return;
-      basePage = ((basePage + delta) % pageCount + pageCount) % pageCount;
+      if (pageCount <= 0 || pageIndex < 0 || pageIndex >= pageCount) return;
+      basePage = pageIndex;
       updateAllSectionPageIndices();
       needsFullUpdate = true;
       host.requestFlush();
@@ -269,35 +273,47 @@ public class ElectraOneExtension extends ControllerExtension
       if ((status & 0xF0) != 0xB0) return;          // CC only
       if ((status & 0x0F) != CHANNEL) return;        // our channel only
 
-      // Navigation knobs — relative 2's complement, with accumulator.
-      // Accumulate ticks until NAV_THRESHOLD is reached (~1/3 turn per step).
-      int relDelta = data2 < 64 ? data2 : data2 - 128;
-
       switch (data1)
       {
          case CC_PAGE:
-            accumPage += relDelta;
-            while (accumPage >= thresholdPage)  { navigatePage(1);  accumPage -= thresholdPage; }
-            while (accumPage <= -thresholdPage) { navigatePage(-1); accumPage += thresholdPage; }
+         {
+            // Absolute: CC 0-127 spread over max 16 pages
+            if (pageCount <= 0) return;
+            int idx = data2 / (128 / Math.min(pageCount, MAX_NAV_ITEMS));
+            if (idx >= pageCount) idx = pageCount - 1;
+            if (idx != basePage) selectPage(idx);
             return;
+         }
 
          case CC_TRACK:
-            accumTrack += relDelta;
-            while (accumTrack >= thresholdTrack)  { cursorTrack.selectNext();     accumTrack -= thresholdTrack; }
-            while (accumTrack <= -thresholdTrack) { cursorTrack.selectPrevious(); accumTrack += thresholdTrack; }
+         {
+            // Absolute: CC 0-127 spread over max 16 tracks
+            int idx = data2 / (128 / MAX_NAV_ITEMS);
+            if (idx >= MAX_NAV_ITEMS) idx = MAX_NAV_ITEMS - 1;
+            if (trackBank.getItemAt(idx).exists().get())
+               trackBank.getItemAt(idx).selectInMixer();
             return;
+         }
 
          case CC_DEVICE:
-            accumDevice += relDelta;
-            while (accumDevice >= thresholdDevice)  { cursorDevice.selectNext();     accumDevice -= thresholdDevice; }
-            while (accumDevice <= -thresholdDevice) { cursorDevice.selectPrevious(); accumDevice += thresholdDevice; }
+         {
+            // Absolute: CC 0-127 spread over max 16 devices
+            int idx = data2 / (128 / MAX_NAV_ITEMS);
+            if (idx >= MAX_NAV_ITEMS) idx = MAX_NAV_ITEMS - 1;
+            if (deviceBank.getDevice(idx).exists().get())
+               deviceBank.getDevice(idx).selectInEditor();
             return;
+         }
 
          case CC_VOLUME:
+         {
+            // Volume: relative encoder with accumulator
+            int relDelta = data2 < 64 ? data2 : data2 - 128;
             accumVolume += relDelta;
             while (accumVolume >= thresholdVolume)  { cursorTrack.volume().inc(1, 128);  accumVolume -= thresholdVolume; }
             while (accumVolume <= -thresholdVolume) { cursorTrack.volume().inc(-1, 128); accumVolume += thresholdVolume; }
             return;
+         }
       }
 
       // Parameter knobs — check all 3 sections' CCs
