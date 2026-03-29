@@ -86,6 +86,13 @@ public class ElectraOneExtension extends ControllerExtension
    private int accumDevice = 0;
    private int accumVolume = 0;
 
+   // Rate limiting for navigation knobs — minimum interval between actions (ms).
+   // Prevents rapid encoder turns from queuing up many navigation commands.
+   private static final long NAV_RATE_LIMIT_MS = 1000;
+   private long lastNavPageTime   = 0;
+   private long lastNavTrackTime  = 0;
+   private long lastNavDeviceTime = 0;
+
    // SysEx heartbeat spam filter
    private int heartbeatCount = 0;
 
@@ -273,30 +280,70 @@ public class ElectraOneExtension extends ControllerExtension
       // Accumulate ticks until NAV_THRESHOLD is reached (~1/3 turn per step).
       int relDelta = data2 < 64 ? data2 : data2 - 128;
 
+      long now = System.currentTimeMillis();
+
       switch (data1)
       {
          case CC_PAGE:
             accumPage += relDelta;
-            while (accumPage >= thresholdPage)  { navigatePage(1);  accumPage -= thresholdPage; }
-            while (accumPage <= -thresholdPage) { navigatePage(-1); accumPage += thresholdPage; }
+            if (accumPage >= thresholdPage && now - lastNavPageTime >= NAV_RATE_LIMIT_MS)
+            {
+               navigatePage(1);
+               accumPage = 0;
+               lastNavPageTime = now;
+            }
+            else if (accumPage <= -thresholdPage && now - lastNavPageTime >= NAV_RATE_LIMIT_MS)
+            {
+               navigatePage(-1);
+               accumPage = 0;
+               lastNavPageTime = now;
+            }
             return;
 
          case CC_TRACK:
             accumTrack += relDelta;
-            while (accumTrack >= thresholdTrack)  { cursorTrack.selectNext();     accumTrack -= thresholdTrack; }
-            while (accumTrack <= -thresholdTrack) { cursorTrack.selectPrevious(); accumTrack += thresholdTrack; }
+            if (accumTrack >= thresholdTrack && now - lastNavTrackTime >= NAV_RATE_LIMIT_MS)
+            {
+               cursorTrack.selectNext();
+               accumTrack = 0;
+               lastNavTrackTime = now;
+            }
+            else if (accumTrack <= -thresholdTrack && now - lastNavTrackTime >= NAV_RATE_LIMIT_MS)
+            {
+               cursorTrack.selectPrevious();
+               accumTrack = 0;
+               lastNavTrackTime = now;
+            }
             return;
 
          case CC_DEVICE:
             accumDevice += relDelta;
-            while (accumDevice >= thresholdDevice)  { cursorDevice.selectNext();     accumDevice -= thresholdDevice; }
-            while (accumDevice <= -thresholdDevice) { cursorDevice.selectPrevious(); accumDevice += thresholdDevice; }
+            if (accumDevice >= thresholdDevice && now - lastNavDeviceTime >= NAV_RATE_LIMIT_MS)
+            {
+               cursorDevice.selectNext();
+               accumDevice = 0;
+               lastNavDeviceTime = now;
+            }
+            else if (accumDevice <= -thresholdDevice && now - lastNavDeviceTime >= NAV_RATE_LIMIT_MS)
+            {
+               cursorDevice.selectPrevious();
+               accumDevice = 0;
+               lastNavDeviceTime = now;
+            }
             return;
 
          case CC_VOLUME:
             accumVolume += relDelta;
-            while (accumVolume >= thresholdVolume)  { cursorTrack.volume().inc(1, 3);  accumVolume -= thresholdVolume; }
-            while (accumVolume <= -thresholdVolume) { cursorTrack.volume().inc(-1, 3); accumVolume += thresholdVolume; }
+            if (accumVolume >= thresholdVolume)
+            {
+               cursorTrack.volume().inc(1, 128);
+               accumVolume = 0;
+            }
+            else if (accumVolume <= -thresholdVolume)
+            {
+               cursorTrack.volume().inc(-1, 128);
+               accumVolume = 0;
+            }
             return;
       }
 
