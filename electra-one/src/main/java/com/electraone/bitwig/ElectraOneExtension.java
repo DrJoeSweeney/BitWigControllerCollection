@@ -83,9 +83,6 @@ public class ElectraOneExtension extends ControllerExtension
    private static final long ECHO_SUPPRESS_MS = 250;
    private final long[][] lastHardwareTime = new long[NUM_SECTIONS][NUM_PARAMS];
 
-   // Volume encoder accumulator
-   private int thresholdVolume = 10;
-   private int accumVolume = 0;
 
    // SysEx heartbeat spam filter
    private int heartbeatCount = 0;
@@ -109,11 +106,6 @@ public class ElectraOneExtension extends ControllerExtension
       midiOut          = host.getMidiOutPort(PORT_MIDI);
       MidiOut ctrlOut  = host.getMidiOutPort(PORT_CTRL);
       sysEx = new ElectraOneSysEx(ctrlOut, host);
-
-      // Volume encoder sensitivity preference
-      host.getPreferences().getNumberSetting(
-         "Volume Encoder Sensitivity", "Encoder Speed", 1, 20, 1, "", 10)
-         .addValueObserver(20, val -> thresholdVolume = Math.max(1, val));
 
       // Transport (for play/stop toggle via B6 touch)
       transport = host.createTransport();
@@ -306,14 +298,9 @@ public class ElectraOneExtension extends ControllerExtension
          }
 
          case CC_VOLUME:
-         {
-            // Volume: relative encoder with accumulator
-            int relDelta = data2 < 64 ? data2 : data2 - 128;
-            accumVolume += relDelta;
-            while (accumVolume >= thresholdVolume)  { cursorTrack.volume().inc(1, 128);  accumVolume -= thresholdVolume; }
-            while (accumVolume <= -thresholdVolume) { cursorTrack.volume().inc(-1, 128); accumVolume += thresholdVolume; }
+            // Absolute CC 0-127 → track volume
+            cursorTrack.volume().set(data2 / 127.0);
             return;
-         }
       }
 
       // Parameter knobs — check all 3 sections' CCs
