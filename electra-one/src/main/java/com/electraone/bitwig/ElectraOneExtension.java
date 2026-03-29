@@ -295,8 +295,8 @@ public class ElectraOneExtension extends ControllerExtension
 
          case CC_VOLUME:
             accumVolume += relDelta;
-            while (accumVolume >= thresholdVolume)  { cursorTrack.volume().inc(1, 3);  accumVolume -= thresholdVolume; }
-            while (accumVolume <= -thresholdVolume) { cursorTrack.volume().inc(-1, 3); accumVolume += thresholdVolume; }
+            while (accumVolume >= thresholdVolume)  { cursorTrack.volume().inc(1, 128);  accumVolume -= thresholdVolume; }
+            while (accumVolume <= -thresholdVolume) { cursorTrack.volume().inc(-1, 128); accumVolume += thresholdVolume; }
             return;
       }
 
@@ -462,20 +462,27 @@ public class ElectraOneExtension extends ControllerExtension
 
       for (int s = 0; s < NUM_SECTIONS; s++)
       {
+         String pageName = getPageName(s);
          sysEx.sendControlNameColor(
-            getNavControlId(s, NAV_PAGE_OFFSET), "Page", NAV_COLOR);
+            getNavControlId(s, NAV_PAGE_OFFSET),
+            pageName.isEmpty() || pageName.equals("---") ? "Page" : pageName,
+            NAV_COLOR);
          sysEx.sendValueLabel(
-            getNavControlId(s, NAV_PAGE_OFFSET), getPageName(s));
+            getNavControlId(s, NAV_PAGE_OFFSET), "Page");
 
          sysEx.sendControlNameColor(
-            getNavControlId(s, NAV_TRACK_OFFSET), "Track", NAV_COLOR);
+            getNavControlId(s, NAV_TRACK_OFFSET),
+            trackName.isEmpty() ? "Track" : trackName,
+            NAV_COLOR);
          sysEx.sendValueLabel(
-            getNavControlId(s, NAV_TRACK_OFFSET), trackName);
+            getNavControlId(s, NAV_TRACK_OFFSET), "Track");
 
          sysEx.sendControlNameColor(
-            getNavControlId(s, NAV_DEVICE_OFFSET), "Device", NAV_COLOR);
+            getNavControlId(s, NAV_DEVICE_OFFSET),
+            deviceName.isEmpty() ? "Device" : deviceName,
+            NAV_COLOR);
          sysEx.sendValueLabel(
-            getNavControlId(s, NAV_DEVICE_OFFSET), deviceName);
+            getNavControlId(s, NAV_DEVICE_OFFSET), "Device");
 
          sysEx.sendControlNameColor(
             getNavControlId(s, NAV_VOLUME_OFFSET), "Volume", volColor);
