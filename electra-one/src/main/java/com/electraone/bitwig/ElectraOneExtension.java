@@ -250,21 +250,17 @@ public class ElectraOneExtension extends ControllerExtension
          }
       }
 
-      // Upload E1 preset and do initial list updates after Bitwig populates observers
+      // Delayed full update (give Bitwig time to populate observers)
       host.scheduleTask(() ->
       {
-         sysEx.uploadPreset(buildPresetJson());
-         host.scheduleTask(() ->
-         {
-            needsFullUpdate = true;
-            pageListDirty = true;
-            trackListDirty = true;
-            deviceListDirty = true;
-            host.requestFlush();
-         }, 1500);
-      }, 500);
+         needsFullUpdate = true;
+         pageListDirty = true;
+         trackListDirty = true;
+         deviceListDirty = true;
+         host.requestFlush();
+      }, 2000);
 
-      host.println("Electra One v3.0 initialized (list navigation)");
+      host.println("Electra One v3.1 initialized");
    }
 
    // ── Page navigation ───────────────────────────────────────────────────
@@ -385,25 +381,10 @@ public class ElectraOneExtension extends ControllerExtension
    @Override
    public void flush()
    {
-      // Update dynamic lists when dirty
-      if (pageListDirty)
-      {
-         pageListDirty = false;
-         sysEx.updateOverlay(OVERLAY_PAGES, cachedPageNames);
-         sysEx.setListValue(CC_PAGE, basePage);
-      }
-      if (trackListDirty)
-      {
-         trackListDirty = false;
-         String[] names = buildTrackNameList();
-         sysEx.updateOverlay(OVERLAY_TRACKS, names);
-      }
-      if (deviceListDirty)
-      {
-         deviceListDirty = false;
-         String[] names = buildDeviceNameList();
-         sysEx.updateOverlay(OVERLAY_DEVICES, names);
-      }
+      // Reset dirty flags (Lua overlays not supported on E1 V1)
+      pageListDirty = false;
+      trackListDirty = false;
+      deviceListDirty = false;
 
       boolean batch = needsFullUpdate;
       if (batch)
